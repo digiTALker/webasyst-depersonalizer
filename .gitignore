@@ -1,0 +1,12 @@
+# Webasyst кеш и логи
+../../../../wa-cache/
+../../../../wa-log/
+
+# IDE, ОС
+.DS_Store
+Thumbs.db
+*~
+*.swp
+
+# Локальные настройки
+config.local.php
