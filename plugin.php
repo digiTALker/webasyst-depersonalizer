@@ -1,11 +1,14 @@
 <?php
 return array(
-    'name'               => 'Depersonalizer',
-    'vendor'             => 'you',
-    'version'            => '0.1',
+    'name'               => 'AnonGuard — деперсонификация заказов и контактов',
+    'vendor'             => 'incyber',
+    'version'            => '0.3.0',
     'shop_version_from'  => '8.0',
     'shop_version_to'    => '',
-    'description'        => 'Обезличивает старые заказы и контакты',
+    'description'        => 'Обезличивает персональные данные в заказах и контактах старше заданного срока.',
     'license'            => 'proprietary',
-    'author'             => 'Твоё имя',
+    'author'             => 'Incyber',
+    'handlers'           => array(
+        'backend_menu' => 'backendMenu',
+    ),
 );
