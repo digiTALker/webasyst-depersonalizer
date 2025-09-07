@@ -68,12 +68,26 @@ class shopDepersonalizerCli extends waCliController
     protected function processOrders(array $orders, $keep_geo, $wipe_comments, $anonymize_contact_id)
     {
         $params_model = new shopOrderParamsModel();
-        $plugin = wa('shop')->getPlugin('depersonalizer');
+        $order_model  = new shopOrderModel();
+        $plugin       = wa('shop')->getPlugin('depersonalizer');
+        $anon_cid     = null;
+        if ($anonymize_contact_id) {
+            $anon_cid = $plugin->getAnonContactId();
+        }
         foreach ($orders as $o) {
             $params = $params_model->get($o['id']);
             if (ifset($params['depersonalized'], 0)) {
                 continue;
             }
+
+            if ($keep_geo) {
+                foreach (array('country', 'region', 'city') as $gk) {
+                    if (isset($params[$gk])) {
+                        $params_model->set($o['id'], 'geo_' . $gk, $params[$gk]);
+                    }
+                }
+            }
+
             foreach ($params as $k => $v) {
                 if (in_array($k, array('depersonalized', 'depersonalized_at'))) {
                     continue;
@@ -84,6 +98,7 @@ class shopDepersonalizerCli extends waCliController
                 }
                 $params_model->set($o['id'], $k, $this->maskParam($k, $v, $o['id']));
             }
+
             if ($wipe_comments) {
                 foreach (array('comment', 'customer_comment') as $c_key) {
                     if (isset($params[$c_key])) {
@@ -91,6 +106,11 @@ class shopDepersonalizerCli extends waCliController
                     }
                 }
             }
+
+            if ($anonymize_contact_id && !empty($o['contact_id'])) {
+                $order_model->updateById($o['id'], array('contact_id' => $anon_cid));
+            }
+
             $params_model->set($o['id'], 'depersonalized', 1);
             $params_model->set($o['id'], 'depersonalized_at', date('Y-m-d H:i:s'));
         }
@@ -169,7 +189,6 @@ class shopDepersonalizerCli extends waCliController
         } catch (Exception $e) {
             // ignore logging errors but still output to console
         }
-=======
         echo date('[Y-m-d H:i:s] ') . $msg . "\n";
     }
 }

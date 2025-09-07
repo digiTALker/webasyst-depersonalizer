@@ -31,6 +31,27 @@ class shopDepersonalizerPlugin extends shopPlugin
     }
 
     /**
+     * Return ID of anonymous contact, creating one if needed.
+     *
+     * @return int
+     */
+    public function getAnonContactId()
+    {
+        $app_settings_model = new waAppSettingsModel();
+        $cid = $app_settings_model->get('shop', 'depersonalizer.anon_contact_id');
+        if ($cid) {
+            return (int)$cid;
+        }
+        $contact = new waContact();
+        $contact['firstname'] = _wp('Anonymous');
+        $contact['lastname']  = _wp('Customer');
+        $contact->save();
+        $cid = $contact->getId();
+        $app_settings_model->set('shop', 'depersonalizer.anon_contact_id', $cid);
+        return (int)$cid;
+    }
+
+    /**
      * Write message to plugin log
      *
      * @param string $message
