@@ -9,6 +9,11 @@ class shopDepersonalizerCli extends waCliController
      */
     protected $default_days = 365;
 
+    protected $processed_orders = array();
+    protected $skipped_orders = array();
+    protected $processed_contacts = array();
+    protected $skipped_contacts = array();
+
     /**
      * Execute CLI command
      */
@@ -32,6 +37,21 @@ class shopDepersonalizerCli extends waCliController
         if (!$dry_run) {
             $this->processOrders($orders, $keep_geo, $wipe_comments, $anonymize_contact_id);
             $this->processContacts($orders, $cutoff);
+
+            $plugin = wa('shop')->getPlugin('depersonalizer');
+            if ($plugin && method_exists($plugin, 'logBatch')) {
+                $path = $plugin->logBatch(array(
+                    'orders'   => array(
+                        'processed' => $this->processed_orders,
+                        'skipped'   => $this->skipped_orders,
+                    ),
+                    'contacts' => array(
+                        'processed' => $this->processed_contacts,
+                        'skipped'   => $this->skipped_contacts,
+                    ),
+                ));
+                $this->log('Batch details saved to '.$path);
+            }
         }
 
         $this->log('Done');
@@ -72,6 +92,7 @@ class shopDepersonalizerCli extends waCliController
         foreach ($orders as $o) {
             $params = $params_model->get($o['id']);
             if (ifset($params['depersonalized'], 0)) {
+                $this->skipped_orders[$o['id']] = 'already_depersonalized';
                 continue;
             }
             foreach ($params as $k => $v) {
@@ -93,6 +114,7 @@ class shopDepersonalizerCli extends waCliController
             }
             $params_model->set($o['id'], 'depersonalized', 1);
             $params_model->set($o['id'], 'depersonalized_at', date('Y-m-d H:i:s'));
+            $this->processed_orders[] = $o['id'];
         }
     }
 
@@ -119,6 +141,7 @@ class shopDepersonalizerCli extends waCliController
         foreach (array_keys($contact_ids) as $cid) {
             $has_new = $order_model->query("SELECT 1 FROM shop_order WHERE contact_id = i:cid AND create_datetime >= s:cutoff LIMIT 1", array('cid' => $cid, 'cutoff' => $cutoff))->fetch();
             if ($has_new) {
+                $this->skipped_contacts[$cid] = 'has_newer_orders';
                 continue;
             }
             $contact_model->updateById($cid, array(
@@ -131,6 +154,7 @@ class shopDepersonalizerCli extends waCliController
             $addr_model->deleteByField('contact_id', $cid);
             $param_model->set($cid, 'depersonalized', 1);
             $param_model->set($cid, 'depersonalized_at', date('Y-m-d H:i:s'));
+            $this->processed_contacts[] = $cid;
         }
     }
 
@@ -169,7 +193,6 @@ class shopDepersonalizerCli extends waCliController
         } catch (Exception $e) {
             // ignore logging errors but still output to console
         }
-=======
         echo date('[Y-m-d H:i:s] ') . $msg . "\n";
     }
 }

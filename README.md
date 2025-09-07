@@ -9,8 +9,7 @@ Features:
 * Settings stored in `wa_app_settings`.
 
 * All runs write to `wa-log/depersonalizer.log`.
-=======
-* Logs operations into `wa-log/depersonalizer.log`.
+* Batch details saved as JSON under `wa-log/depersonalizer/YYYY-MM-DD/`.
 
 
 > **Warning:** This is a simplified implementation for demo purposes. UI and
