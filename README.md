@@ -8,8 +8,6 @@ Features:
 * CLI command for batch depersonalization.
 * Settings stored in `wa_app_settings`.
 
-* All runs write to `wa-log/depersonalizer.log`.
-=======
 * Logs operations into `wa-log/depersonalizer.log`.
 
 
