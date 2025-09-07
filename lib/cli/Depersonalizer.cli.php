@@ -160,6 +160,16 @@ class shopDepersonalizerCli extends waCliController
      */
     protected function log($msg)
     {
+        // use plugin logger to persist messages
+        try {
+            $plugin = wa('shop')->getPlugin('depersonalizer');
+            if ($plugin && method_exists($plugin, 'log')) {
+                $plugin->log($msg);
+            }
+        } catch (Exception $e) {
+            // ignore logging errors but still output to console
+        }
+=======
         echo date('[Y-m-d H:i:s] ') . $msg . "\n";
     }
 }

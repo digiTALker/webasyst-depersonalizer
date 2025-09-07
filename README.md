@@ -7,7 +7,11 @@ Features:
 
 * CLI command for batch depersonalization.
 * Settings stored in `wa_app_settings`.
+
+* All runs write to `wa-log/depersonalizer.log`.
+=======
 * Logs operations into `wa-log/depersonalizer.log`.
+
 
 > **Warning:** This is a simplified implementation for demo purposes. UI and
 > advanced batch processing are not included.
