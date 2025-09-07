@@ -82,6 +82,29 @@ class shopDepersonalizerPlugin extends shopPlugin
     }
 
     /**
+     * Save batch processing details to dated JSON log file.
+     *
+     * @param array $data Arbitrary batch information
+     * @return string Absolute path to created log file
+     */
+    public function logBatch(array $data)
+    {
+        $root = wa()->getConfig()->getRootPath();
+        $dir  = $root.'/wa-log/depersonalizer/'.date('Y-m-d');
+        if (!is_dir($dir)) {
+            mkdir($dir, 0777, true);
+        }
+        $file = $dir.'/batch-'.date('H-i-s').'.json';
+        $json = json_encode($data, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+        file_put_contents($file, $json);
+
+        // keep reference to log file in main plugin log
+        waLog::log('Batch log created: '.$file, self::LOG_FILE);
+
+        return $file;
+    }
+
+    /**
      * Add plugin link to backend menu
      *
      * @param array $menu
