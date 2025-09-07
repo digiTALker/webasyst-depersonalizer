@@ -169,6 +169,7 @@ class shopDepersonalizerCli extends waCliController
         } catch (Exception $e) {
             // ignore logging errors but still output to console
         }
+=======
         echo date('[Y-m-d H:i:s] ') . $msg . "\n";
     }
 }
