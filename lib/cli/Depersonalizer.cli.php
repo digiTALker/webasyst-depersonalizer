@@ -92,8 +92,7 @@ class shopDepersonalizerCli extends waCliController
                 if (in_array($k, array('depersonalized', 'depersonalized_at'))) {
                     continue;
                 }
-                $is_pii = in_array($k, $plugin->getPIIKeys()) || preg_match('/(name|email|phone|address|zip|city|region|street|house)/i', $k);
-                if (!$is_pii) {
+                if (!$plugin->isPIIKey($k)) {
                     continue;
                 }
                 $params_model->set($o['id'], $k, $this->maskParam($k, $v, $o['id']));
@@ -168,20 +167,16 @@ class shopDepersonalizerCli extends waCliController
      */
     protected function maskParam($key, $value, $order_id)
     {
-        switch ($key) {
-            case 'email':
-                return 'anon+'.$order_id.'@example.invalid';
-            case 'phone':
-                return 'anon-'.sha1($order_id);
-            case 'firstname':
-            case 'middlename':
-            case 'lastname':
-            case 'name':
-            case 'company':
-                return _wp('Удалено');
-            default:
-                return '';
+        if (preg_match('/email/i', $key)) {
+            return 'anon+'.$order_id.'@example.invalid';
         }
+        if (preg_match('/phone/i', $key)) {
+            return 'anon-'.sha1($order_id);
+        }
+        if (preg_match('/(firstname|middlename|lastname|name|company)/i', $key)) {
+            return _wp('Удалено');
+        }
+        return '';
     }
 
     /**
