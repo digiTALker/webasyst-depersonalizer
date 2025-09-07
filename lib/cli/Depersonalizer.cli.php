@@ -26,12 +26,49 @@ class shopDepersonalizerCli extends waCliController
         $this->log("Starting depersonalization for orders before {$cutoff}. Mode: " . ($dry_run ? 'dry-run' : 'apply'));
 
         $order_model = new shopOrderModel();
-        $orders = $order_model->select('id, contact_id')->where('create_datetime < ?', $cutoff)->fetchAll();
-        $this->log("Found old orders: " . count($orders));
 
-        if (!$dry_run) {
-            $this->processOrders($orders, $keep_geo, $wipe_comments, $anonymize_contact_id);
-            $this->processContacts($orders, $cutoff);
+        $total = (int)$order_model
+            ->query(
+                "SELECT COUNT(*) cnt FROM shop_order WHERE create_datetime < s:cutoff",
+                array('cutoff' => $cutoff)
+            )
+            ->fetchField();
+        $this->log("Found old orders: " . $total);
+
+        if ($dry_run) {
+            $this->log('Dry-run mode. No data will be modified.');
+        } else {
+            $limit = 500;
+            $offset = 0;
+            $processed = 0;
+            while (true) {
+                $orders = $order_model
+                    ->query(
+                        "SELECT id, contact_id FROM shop_order WHERE create_datetime < s:cutoff ORDER BY id LIMIT i:limit OFFSET i:offset",
+                        array(
+                            'cutoff' => $cutoff,
+                            'limit' => $limit,
+                            'offset' => $offset,
+                        )
+                    )
+                    ->fetchAll();
+
+                if (!$orders) {
+                    break;
+                }
+
+                $this->processOrders($orders, $keep_geo, $wipe_comments, $anonymize_contact_id);
+                $this->processContacts($orders, $cutoff);
+
+                $processed += count($orders);
+                $this->log("Processed {$processed}/{$total}");
+
+                $offset += $limit;
+                unset($orders);
+                if (function_exists('gc_collect_cycles')) {
+                    gc_collect_cycles();
+                }
+            }
         }
 
         $this->log('Done');
@@ -169,7 +206,7 @@ class shopDepersonalizerCli extends waCliController
         } catch (Exception $e) {
             // ignore logging errors but still output to console
         }
-=======
+
         echo date('[Y-m-d H:i:s] ') . $msg . "\n";
     }
 }
