@@ -136,9 +136,18 @@ class shopDepersonalizerCli extends waCliController
         $phone_model = new waContactDataModel();
         $addr_model = new waContactAddressesModel();
         $param_model = new waContactParamsModel();
+        $plugin = wa('shop')->getPlugin('depersonalizer');
         foreach (array_keys($contact_ids) as $cid) {
             $has_new = $order_model->query("SELECT 1 FROM shop_order WHERE contact_id = i:cid AND create_datetime >= s:cutoff LIMIT 1", array('cid' => $cid, 'cutoff' => $cutoff))->fetch();
             if ($has_new) {
+                continue;
+            }
+            $is_depersonalized = $param_model->query(
+                "SELECT 1 FROM wa_contact_params WHERE contact_id = i:cid AND name = 'depersonalized' AND value = 1 LIMIT 1",
+                array('cid' => $cid)
+            )->fetch();
+            if ($is_depersonalized) {
+                $plugin->log(sprintf('Skipping contact %d: already depersonalized', $cid));
                 continue;
             }
             $contact_model->updateById($cid, array(
