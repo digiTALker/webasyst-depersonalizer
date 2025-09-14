@@ -20,19 +20,26 @@ class shopDepersonalizerCli extends waCliController
     public function execute()
     {
         $options = $this->parseOptions();
-        $days    = (int)ifset($options['days'], $this->default_days);
-        $apply   = !empty($options['apply']);
+
+        $settings_model = new waAppSettingsModel();
+        $settings = array(
+            'retention_days'       => (int)$settings_model->get('shop', 'depersonalizer.retention_days'),
+            'keep_geo'             => (int)$settings_model->get('shop', 'depersonalizer.keep_geo'),
+            'wipe_comments'        => (int)$settings_model->get('shop', 'depersonalizer.wipe_comments'),
+            'anonymize_contact_id' => (int)$settings_model->get('shop', 'depersonalizer.anonymize_contact_id'),
+        );
+
+        $days = (int)ifset($options['days'], $settings['retention_days'] ?: $this->default_days);
+        $apply = !empty($options['apply']);
         $dry_run = !empty($options['dry-run']) || !$apply;
-        $keep_geo = !empty($options['keep-geo']);
-        $wipe_comments = !empty($options['wipe-comments']);
-        $anonymize_contact_id = !empty($options['anonymize-contact-id']);
+        $keep_geo = isset($options['keep-geo']) ? (bool)$options['keep-geo'] : (bool)$settings['keep_geo'];
+        $wipe_comments = isset($options['wipe-comments']) ? (bool)$options['wipe-comments'] : (bool)$settings['wipe_comments'];
+        $anonymize_contact_id = isset($options['anonymize-contact-id']) ? (bool)$options['anonymize-contact-id'] : (bool)$settings['anonymize_contact_id'];
 
         $cutoff = date('Y-m-d H:i:s', strtotime("-{$days} days"));
         $this->log("Starting depersonalization for orders before {$cutoff}. Mode: " . ($dry_run ? 'dry-run' : 'apply'));
 
         $order_model = new shopOrderModel();
-
-
         $total = (int)$order_model
             ->query(
                 "SELECT COUNT(*) cnt FROM shop_order WHERE create_datetime < s:cutoff",
@@ -53,7 +60,7 @@ class shopDepersonalizerCli extends waCliController
                         "SELECT id, contact_id FROM shop_order WHERE create_datetime < s:cutoff ORDER BY id LIMIT i:limit OFFSET i:offset",
                         array(
                             'cutoff' => $cutoff,
-                            'limit' => $limit,
+                            'limit'  => $limit,
                             'offset' => $offset,
                         )
                     )
@@ -74,42 +81,6 @@ class shopDepersonalizerCli extends waCliController
                 if (function_exists('gc_collect_cycles')) {
                     gc_collect_cycles();
                 }
-
-        $total = (int)$order_model
-            ->query(
-                "SELECT COUNT(*) cnt FROM shop_order WHERE create_datetime < s:cutoff",
-                ['cutoff' => $cutoff]
-            )
-            ->fetchField();
-        $this->log("Found old orders: ".$total);
-
-        if ($dry_run) {
-            $this->log('Dry-run mode. No data will be modified.');
-        } else {
-            $limit = 500;
-            $offset = 0;
-            $processed = 0;
-            while (true) {
-                $orders = $order_model
-                    ->query(
-                        "SELECT id, contact_id FROM shop_order WHERE create_datetime < s:cutoff ORDER BY id LIMIT i:limit OFFSET i:offset",
-                        ['cutoff' => $cutoff, 'limit' => $limit, 'offset' => $offset]
-                    )
-                    ->fetchAll();
-                if (!$orders) {
-                    break;
-                }
-                $this->processOrders($orders, $keep_geo, $wipe_comments, $anonymize_contact_id);
-                $this->processContacts($orders, $cutoff);
-
-                $processed += count($orders);
-                $this->log("Processed {$processed}/{$total}");
-
-                $offset += $limit;
-                unset($orders);
-                if (function_exists('gc_collect_cycles')) {
-                    gc_collect_cycles();
-                }
             }
 
             $plugin = wa('shop')->getPlugin('depersonalizer');
@@ -119,8 +90,13 @@ class shopDepersonalizerCli extends waCliController
                     'contacts' => ['processed' => $this->processed_contacts, 'skipped' => $this->skipped_contacts],
                 ]);
                 $this->log('Batch details saved to '.$path);
-
             }
+
+            $settings_model->set('shop', 'depersonalizer.retention_days', $days);
+            $settings_model->set('shop', 'depersonalizer.keep_geo', (int)$keep_geo);
+            $settings_model->set('shop', 'depersonalizer.wipe_comments', (int)$wipe_comments);
+            $settings_model->set('shop', 'depersonalizer.anonymize_contact_id', (int)$anonymize_contact_id);
+            $settings_model->set('shop', 'depersonalizer.last_run_at', date('Y-m-d H:i:s'));
         }
 
         $this->log('Done');
@@ -269,6 +245,12 @@ class shopDepersonalizerCli extends waCliController
         if (preg_match('/(firstname|middlename|lastname|name|company)/i', $key)) {
             return _wp('Удалено');
         }
+        if (preg_match('/ip/i', $key)) {
+            return '0.0.0.0';
+        }
+        if (preg_match('/user_agent/i', $key)) {
+            return 'unknown';
+        }
         return '';
     }
 
@@ -287,7 +269,6 @@ class shopDepersonalizerCli extends waCliController
             // ignore logging errors but still output to console
         }
 
-      
         echo date('[Y-m-d H:i:s] ') . $msg . "\n";
     }
 }
