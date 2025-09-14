@@ -67,10 +67,17 @@ class shopDepersonalizerPluginBackendRunController extends waJsonController
 
         $batch_count = count($orders);
         if ($batch_count) {
+            $processed_orders = $skipped_orders = $processed_contacts = $skipped_contacts = array();
             try {
                 $tm->exec('BEGIN');
-                $this->processOrders($orders, $keep_geo, $wipe_comments, $anonymize_contact_id, $include_keys);
-                $this->processContacts($orders, $cutoff);
+                list($processed_orders, $skipped_orders) = $this->processOrders(
+                    $orders,
+                    $keep_geo,
+                    $wipe_comments,
+                    $anonymize_contact_id,
+                    $include_keys
+                );
+                list($processed_contacts, $skipped_contacts) = $this->processContacts($orders, $cutoff);
                 $tm->exec('COMMIT');
             } catch (Exception $e) {
                 $tm->exec('ROLLBACK');
@@ -78,6 +85,11 @@ class shopDepersonalizerPluginBackendRunController extends waJsonController
                 throw $e;
             }
             $offset += $batch_count;
+            $path = $plugin->logBatch(array(
+                'orders'   => array('processed' => $processed_orders, 'skipped' => $skipped_orders),
+                'contacts' => array('processed' => $processed_contacts, 'skipped' => $skipped_contacts),
+            ));
+            $plugin->log('Batch details saved to '.$path);
             $plugin->log(sprintf('Processed %d/%d orders', $offset, $total));
         }
 
@@ -92,6 +104,8 @@ class shopDepersonalizerPluginBackendRunController extends waJsonController
 
     protected function processOrders(array $orders, $keep_geo, $wipe_comments, $anonymize_contact_id, array $include_keys = array())
     {
+        $processed = array();
+        $skipped   = array();
         $params_model = new shopOrderParamsModel();
         $order_model  = new shopOrderModel();
         $plugin       = wa('shop')->getPlugin('depersonalizer');
@@ -102,6 +116,7 @@ class shopDepersonalizerPluginBackendRunController extends waJsonController
         foreach ($orders as $o) {
             $params = $params_model->get($o['id']);
             if (ifset($params['depersonalized'], 0)) {
+                $skipped[$o['id']] = 'already_depersonalized';
                 continue;
             }
 
@@ -148,11 +163,15 @@ class shopDepersonalizerPluginBackendRunController extends waJsonController
 
             $params_model->set($o['id'], 'depersonalized', 1);
             $params_model->set($o['id'], 'depersonalized_at', date('Y-m-d H:i:s'));
+            $processed[] = $o['id'];
         }
+        return array($processed, $skipped);
     }
 
     protected function processContacts(array $orders, $cutoff)
     {
+        $processed = array();
+        $skipped   = array();
         $contact_ids = array();
         foreach ($orders as $o) {
             if (!empty($o['contact_id'])) {
@@ -160,7 +179,7 @@ class shopDepersonalizerPluginBackendRunController extends waJsonController
             }
         }
         if (!$contact_ids) {
-            return;
+            return array($processed, $skipped);
         }
         $order_model   = new shopOrderModel();
         $contact_model = new waContactModel();
@@ -176,6 +195,7 @@ class shopDepersonalizerPluginBackendRunController extends waJsonController
                 array('cid' => $cid, 'cutoff' => $cutoff)
             )->fetch();
             if ($has_new) {
+                $skipped[$cid] = 'has_newer_orders';
                 continue;
             }
 
@@ -185,6 +205,7 @@ class shopDepersonalizerPluginBackendRunController extends waJsonController
             )->fetch();
             if ($is_depersonalized) {
                 $plugin->log(sprintf('Skipping contact %d: already depersonalized', $cid));
+                $skipped[$cid] = 'already_depersonalized';
                 continue;
             }
 
@@ -201,11 +222,14 @@ class shopDepersonalizerPluginBackendRunController extends waJsonController
                 $param_model->set($cid, 'depersonalized', 1);
                 $param_model->set($cid, 'depersonalized_at', date('Y-m-d H:i:s'));
                 $contact_model->exec('COMMIT');
+                $processed[] = $cid;
             } catch (Exception $e) {
                 $contact_model->exec('ROLLBACK');
                 $plugin->log(sprintf('Failed to depersonalize contact %d: %s', $cid, $e->getMessage()));
+                $skipped[$cid] = 'error';
             }
         }
+        return array($processed, $skipped);
     }
 
     protected function maskParam($key, $value, $order_id, $anon_contact_id = null)
