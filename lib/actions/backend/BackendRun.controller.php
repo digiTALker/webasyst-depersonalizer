@@ -145,19 +145,21 @@ class shopDepersonalizerPluginBackendRunController extends waJsonController
 
     protected function maskParam($key, $value, $order_id)
     {
-        switch ($key) {
-            case 'email':
-                return 'anon+'.$order_id.'@example.invalid';
-            case 'phone':
-                return 'anon-'.sha1($order_id);
-            case 'firstname':
-            case 'middlename':
-            case 'lastname':
-            case 'name':
-            case 'company':
-                return _wp('Удалено');
-            default:
-                return '';
+        if (preg_match('/email/i', $key)) {
+            return 'anon+'.$order_id.'@example.invalid';
         }
+        if (preg_match('/phone/i', $key)) {
+            return 'anon-'.sha1($order_id);
+        }
+        if (preg_match('/(firstname|middlename|lastname|name|company)/i', $key)) {
+            return _wp('Удалено');
+        }
+        if (preg_match('/ip/i', $key)) {
+            return '0.0.0.0';
+        }
+        if (preg_match('/user_agent/i', $key)) {
+            return 'unknown';
+        }
+        return '';
     }
 }

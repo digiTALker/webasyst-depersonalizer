@@ -23,6 +23,12 @@ class shopDepersonalizerPluginBackendRunAction extends waViewAction
             'exclude'              => waRequest::post('exclude', array()),
             '_csrf'                => $csrf,
         );
+        $settings_model = new waAppSettingsModel();
+        $settings_model->set('shop', 'depersonalizer.retention_days', $options['days']);
+        $settings_model->set('shop', 'depersonalizer.keep_geo', (int)$options['keep_geo']);
+        $settings_model->set('shop', 'depersonalizer.wipe_comments', (int)$options['wipe_comments']);
+        $settings_model->set('shop', 'depersonalizer.anonymize_contact_id', (int)$options['anonymize_contact_id']);
+        $settings_model->set('shop', 'depersonalizer.last_run_at', date('Y-m-d H:i:s'));
 
         $this->view->assign('options', $options);
     }
