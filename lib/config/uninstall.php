@@ -14,6 +14,7 @@ class shopDepersonalizerPluginUninstall
             'depersonalizer.anonymize_contact_id',
             'depersonalizer.anon_contact_id',
             'depersonalizer.last_run_at',
+            'depersonalizer.last_log_path',
         );
         foreach ($keys as $key) {
             $app_settings_model->del('shop', $key);

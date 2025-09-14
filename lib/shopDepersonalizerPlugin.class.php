@@ -121,6 +121,10 @@ class shopDepersonalizerPlugin extends shopPlugin
         // keep reference to log file in main plugin log
         waLog::log('Batch log created: '.$file, self::LOG_FILE);
 
+        // remember path to last log file in settings
+        $settings_model = new waAppSettingsModel();
+        $settings_model->set('shop', 'depersonalizer.last_log_path', $file);
+
         return $file;
     }
 
