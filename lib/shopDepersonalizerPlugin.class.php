@@ -17,7 +17,7 @@ class shopDepersonalizerPlugin extends shopPlugin
         'firstname', 'middlename', 'lastname', 'name', 'company',
         'email', 'phone',
         'shipping_address', 'billing_address',
-        'address', 'zip', 'city', 'region', 'street', 'house',
+        'address', 'zip', 'city', 'region', 'country', 'street', 'house',
         'customer_comment', 'comment', 'ip', 'user_agent',
         // shipping details
         'shipping_firstname', 'shipping_middlename', 'shipping_lastname',
@@ -39,7 +39,7 @@ class shopDepersonalizerPlugin extends shopPlugin
      */
     public function isPIIKey($key)
     {
-        return in_array($key, $this->pii_keys) || preg_match('/(name|email|phone|address|zip|city|region|street|house)/i', $key);
+        return in_array($key, $this->pii_keys) || preg_match('/(name|email|phone|address|zip|city|region|street|house|country)/i', $key);
     }
 
     /**
@@ -52,7 +52,7 @@ class shopDepersonalizerPlugin extends shopPlugin
     {
         $detected = array();
         foreach ($params as $k => $v) {
-            if (preg_match('/(name|email|phone|address|zip|city|region|street|house)/i', $k)) {
+            if (preg_match('/(name|email|phone|address|zip|city|region|street|house|country)/i', $k)) {
                 $detected[] = $k;
             }
         }

@@ -155,8 +155,12 @@ class shopDepersonalizerCli extends waCliController
 
             if ($keep_geo) {
                 foreach (array('country', 'region', 'city') as $gk) {
-                    if (isset($params[$gk])) {
-                        $params_model->set($o['id'], 'geo_' . $gk, $params[$gk]);
+                    foreach (array('', 'shipping_', 'billing_') as $prefix) {
+                        $src_key = $prefix . $gk;
+                        if (!empty($params[$src_key])) {
+                            $params_model->set($o['id'], 'geo_' . $gk, $params[$src_key]);
+                            break;
+                        }
                     }
                 }
             }
@@ -168,7 +172,11 @@ class shopDepersonalizerCli extends waCliController
                 if (!$plugin->isPIIKey($k)) {
                     continue;
                 }
-                $params_model->set($o['id'], $k, $this->maskParam($k, $v, $o['id']));
+                $params_model->set(
+                    $o['id'],
+                    $k,
+                    $this->maskParam($k, $v, $o['id'], $anonymize_contact_id ? $anon_cid : null)
+                );
             }
 
             if ($wipe_comments) {
@@ -240,9 +248,18 @@ class shopDepersonalizerCli extends waCliController
 
     /**
      * Produce anonymized value for order param
+     *
+     * @param string   $key              Parameter name
+     * @param mixed    $value            Original value
+     * @param int      $order_id         Order identifier used for synthetic data
+     * @param int|null $anon_contact_id  Anonymous contact ID when replacing contact_id
+     * @return string
      */
-    protected function maskParam($key, $value, $order_id)
+    protected function maskParam($key, $value, $order_id, $anon_contact_id = null)
     {
+        if ($anon_contact_id !== null && $key === 'contact_id') {
+            return $anon_contact_id;
+        }
         if (preg_match('/email/i', $key)) {
             return 'anon+'.$order_id.'@example.invalid';
         }
