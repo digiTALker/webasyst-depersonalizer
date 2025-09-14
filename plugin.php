@@ -1,4 +1,5 @@
 <?php
+// AnonGuard depersonalizer plugin configuration
 return array(
     'name'               => 'AnonGuard — деперсонификация заказов и контактов',
     'vendor'             => 'incyber',

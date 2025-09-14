@@ -6,5 +6,3 @@
 
 ## 0.3.1
 * Use plugin logger in CLI to create `wa-log/depersonalizer.log`.
-=======
-

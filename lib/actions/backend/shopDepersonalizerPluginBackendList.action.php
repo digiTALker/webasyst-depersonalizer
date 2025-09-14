@@ -6,6 +6,11 @@ class shopDepersonalizerPluginBackendListAction extends waViewAction
 {
     public function execute()
     {
-        $this->view->assign('message', _wp('AnonGuard plugin is installed. CLI usage only in this version.'));
+        $plugin = wa('shop')->getPlugin('depersonalizer');
+        $settings = $plugin->getSettings();
+        $this->view->assign(array(
+            'settings' => $settings,
+            'message'  => _wp('Configure depersonalization and run below.'),
+        ));
     }
 }

@@ -9,6 +9,11 @@ class shopDepersonalizerCli extends waCliController
      */
     protected $default_days = 365;
 
+    protected $processed_orders = array();
+    protected $skipped_orders = array();
+    protected $processed_contacts = array();
+    protected $skipped_contacts = array();
+
     /**
      * Execute CLI command
      */
@@ -26,6 +31,7 @@ class shopDepersonalizerCli extends waCliController
         $this->log("Starting depersonalization for orders before {$cutoff}. Mode: " . ($dry_run ? 'dry-run' : 'apply'));
 
         $order_model = new shopOrderModel();
+
 
         $total = (int)$order_model
             ->query(
@@ -68,6 +74,52 @@ class shopDepersonalizerCli extends waCliController
                 if (function_exists('gc_collect_cycles')) {
                     gc_collect_cycles();
                 }
+
+        $total = (int)$order_model
+            ->query(
+                "SELECT COUNT(*) cnt FROM shop_order WHERE create_datetime < s:cutoff",
+                ['cutoff' => $cutoff]
+            )
+            ->fetchField();
+        $this->log("Found old orders: ".$total);
+
+        if ($dry_run) {
+            $this->log('Dry-run mode. No data will be modified.');
+        } else {
+            $limit = 500;
+            $offset = 0;
+            $processed = 0;
+            while (true) {
+                $orders = $order_model
+                    ->query(
+                        "SELECT id, contact_id FROM shop_order WHERE create_datetime < s:cutoff ORDER BY id LIMIT i:limit OFFSET i:offset",
+                        ['cutoff' => $cutoff, 'limit' => $limit, 'offset' => $offset]
+                    )
+                    ->fetchAll();
+                if (!$orders) {
+                    break;
+                }
+                $this->processOrders($orders, $keep_geo, $wipe_comments, $anonymize_contact_id);
+                $this->processContacts($orders, $cutoff);
+
+                $processed += count($orders);
+                $this->log("Processed {$processed}/{$total}");
+
+                $offset += $limit;
+                unset($orders);
+                if (function_exists('gc_collect_cycles')) {
+                    gc_collect_cycles();
+                }
+            }
+
+            $plugin = wa('shop')->getPlugin('depersonalizer');
+            if ($plugin && method_exists($plugin, 'logBatch')) {
+                $path = $plugin->logBatch([
+                    'orders'   => ['processed' => $this->processed_orders, 'skipped' => $this->skipped_orders],
+                    'contacts' => ['processed' => $this->processed_contacts, 'skipped' => $this->skipped_contacts],
+                ]);
+                $this->log('Batch details saved to '.$path);
+
             }
         }
 
@@ -105,22 +157,37 @@ class shopDepersonalizerCli extends waCliController
     protected function processOrders(array $orders, $keep_geo, $wipe_comments, $anonymize_contact_id)
     {
         $params_model = new shopOrderParamsModel();
-        $plugin = wa('shop')->getPlugin('depersonalizer');
+        $order_model  = new shopOrderModel();
+        $plugin       = wa('shop')->getPlugin('depersonalizer');
+        $anon_cid     = null;
+        if ($anonymize_contact_id) {
+            $anon_cid = $plugin->getAnonContactId();
+        }
         foreach ($orders as $o) {
             $params = $params_model->get($o['id']);
             if (ifset($params['depersonalized'], 0)) {
+                $this->skipped_orders[$o['id']] = 'already_depersonalized';
                 continue;
             }
+
+            if ($keep_geo) {
+                foreach (array('country', 'region', 'city') as $gk) {
+                    if (isset($params[$gk])) {
+                        $params_model->set($o['id'], 'geo_' . $gk, $params[$gk]);
+                    }
+                }
+            }
+
             foreach ($params as $k => $v) {
                 if (in_array($k, array('depersonalized', 'depersonalized_at'))) {
                     continue;
                 }
-                $is_pii = in_array($k, $plugin->getPIIKeys()) || preg_match('/(name|email|phone|address|zip|city|region|street|house)/i', $k);
-                if (!$is_pii) {
+                if (!$plugin->isPIIKey($k)) {
                     continue;
                 }
                 $params_model->set($o['id'], $k, $this->maskParam($k, $v, $o['id']));
             }
+
             if ($wipe_comments) {
                 foreach (array('comment', 'customer_comment') as $c_key) {
                     if (isset($params[$c_key])) {
@@ -128,8 +195,14 @@ class shopDepersonalizerCli extends waCliController
                     }
                 }
             }
+
+            if ($anonymize_contact_id && !empty($o['contact_id'])) {
+                $order_model->updateById($o['id'], array('contact_id' => $anon_cid));
+            }
+
             $params_model->set($o['id'], 'depersonalized', 1);
             $params_model->set($o['id'], 'depersonalized_at', date('Y-m-d H:i:s'));
+            $this->processed_orders[] = $o['id'];
         }
     }
 
@@ -153,9 +226,19 @@ class shopDepersonalizerCli extends waCliController
         $phone_model = new waContactDataModel();
         $addr_model = new waContactAddressesModel();
         $param_model = new waContactParamsModel();
+        $plugin = wa('shop')->getPlugin('depersonalizer');
         foreach (array_keys($contact_ids) as $cid) {
             $has_new = $order_model->query("SELECT 1 FROM shop_order WHERE contact_id = i:cid AND create_datetime >= s:cutoff LIMIT 1", array('cid' => $cid, 'cutoff' => $cutoff))->fetch();
             if ($has_new) {
+                $this->skipped_contacts[$cid] = 'has_newer_orders';
+                continue;
+            }
+            $is_depersonalized = $param_model->query(
+                "SELECT 1 FROM wa_contact_params WHERE contact_id = i:cid AND name = 'depersonalized' AND value = 1 LIMIT 1",
+                array('cid' => $cid)
+            )->fetch();
+            if ($is_depersonalized) {
+                $plugin->log(sprintf('Skipping contact %d: already depersonalized', $cid));
                 continue;
             }
             $contact_model->updateById($cid, array(
@@ -168,6 +251,7 @@ class shopDepersonalizerCli extends waCliController
             $addr_model->deleteByField('contact_id', $cid);
             $param_model->set($cid, 'depersonalized', 1);
             $param_model->set($cid, 'depersonalized_at', date('Y-m-d H:i:s'));
+            $this->processed_contacts[] = $cid;
         }
     }
 
@@ -176,20 +260,16 @@ class shopDepersonalizerCli extends waCliController
      */
     protected function maskParam($key, $value, $order_id)
     {
-        switch ($key) {
-            case 'email':
-                return 'anon+'.$order_id.'@example.invalid';
-            case 'phone':
-                return 'anon-'.sha1($order_id);
-            case 'firstname':
-            case 'middlename':
-            case 'lastname':
-            case 'name':
-            case 'company':
-                return _wp('Удалено');
-            default:
-                return '';
+        if (preg_match('/email/i', $key)) {
+            return 'anon+'.$order_id.'@example.invalid';
         }
+        if (preg_match('/phone/i', $key)) {
+            return 'anon-'.sha1($order_id);
+        }
+        if (preg_match('/(firstname|middlename|lastname|name|company)/i', $key)) {
+            return _wp('Удалено');
+        }
+        return '';
     }
 
     /**
@@ -207,6 +287,7 @@ class shopDepersonalizerCli extends waCliController
             // ignore logging errors but still output to console
         }
 
+      
         echo date('[Y-m-d H:i:s] ') . $msg . "\n";
     }
 }
