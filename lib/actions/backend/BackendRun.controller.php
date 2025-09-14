@@ -45,36 +45,54 @@ class shopDepersonalizerPluginBackendRunController extends waJsonController
         $keep_geo = waRequest::post('keep_geo', 0, waRequest::TYPE_INT);
         $wipe_comments = waRequest::post('wipe_comments', 0, waRequest::TYPE_INT);
         $anonymize_contact_id = waRequest::post('anonymize_contact_id', 0, waRequest::TYPE_INT);
-        $offset = waRequest::post('offset', 0, waRequest::TYPE_INT);
-        $limit  = waRequest::post('limit', 50, waRequest::TYPE_INT);
         $include_keys = waRequest::post('keys', array());
 
         $cutoff = date('Y-m-d H:i:s', strtotime("-{$days} days"));
         $order_model = new shopOrderModel();
         $total = (int)$order_model->select('COUNT(*)')->where('create_datetime < ?', $cutoff)->fetchField();
 
-        $orders = $order_model->select('id, contact_id')
-            ->where('create_datetime < ?', $cutoff)
-            ->order('id')
-            ->limit($limit)
-            ->offset($offset)
-            ->fetchAll();
+        $limit = waRequest::post('limit', 200, waRequest::TYPE_INT);
+        $limit = max(1, min(500, $limit));
+        $offset = 0;
+        $processed = 0;
 
-        $this->processOrders($orders, $keep_geo, $wipe_comments, $anonymize_contact_id, $include_keys);
-        $this->processContacts($orders, $cutoff);
+        $plugin = wa('shop')->getPlugin('depersonalizer');
+        $tm = new waModel();
 
-        $processed = count($orders);
-        $offset += $processed;
+        while (true) {
+            $orders = $order_model->select('id, contact_id')
+                ->where('create_datetime < ?', $cutoff)
+                ->order('id')
+                ->limit($limit)
+                ->offset($offset)
+                ->fetchAll();
+            if (!$orders) {
+                break;
+            }
+            try {
+                $tm->exec('BEGIN');
+                $this->processOrders($orders, $keep_geo, $wipe_comments, $anonymize_contact_id, $include_keys);
+                $this->processContacts($orders, $cutoff);
+                $tm->exec('COMMIT');
+            } catch (Exception $e) {
+                $tm->exec('ROLLBACK');
+                $plugin->log('Batch failed at offset '.$offset.': '.$e->getMessage());
+                throw $e;
+            }
+
+            $batch_count = count($orders);
+            $processed += $batch_count;
+            $offset += $batch_count;
+            $plugin->log(sprintf('Processed %d/%d orders', $processed, $total));
+        }
 
         $this->response = array(
-            'offset'    => $offset,
+            'offset'    => $processed,
             'total'     => $total,
             'processed' => $processed,
-            'done'      => ($offset >= $total),
+            'done'      => ($processed >= $total),
+            'message'   => _wp('Depersonalization completed'),
         );
-        if ($this->response['done']) {
-            $this->response['message'] = _wp('Depersonalization completed');
-        }
     }
 
     protected function processOrders(array $orders, $keep_geo, $wipe_comments, $anonymize_contact_id, array $include_keys = array())
