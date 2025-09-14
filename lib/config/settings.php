@@ -19,6 +19,7 @@ return array(
     ),
     'anonymize_contact_id' => array(
         'title'        => _wp('Replace contact_id with anonymous contact'),
+        'description'  => _wp('Store depersonalized orders under a special anonymous contact.'),
         'value'        => 0,
         'control_type' => waHtmlControl::CHECKBOX,
     ),
