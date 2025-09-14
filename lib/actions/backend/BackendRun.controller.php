@@ -140,27 +140,49 @@ class shopDepersonalizerPluginBackendRunController extends waJsonController
         if (!$contact_ids) {
             return;
         }
-        $order_model = new shopOrderModel();
+        $order_model   = new shopOrderModel();
         $contact_model = new waContactModel();
-        $email_model = new waContactEmailsModel();
-        $phone_model = new waContactDataModel();
-        $addr_model = new waContactAddressesModel();
-        $param_model = new waContactParamsModel();
+        $email_model   = new waContactEmailsModel();
+        $phone_model   = new waContactDataModel();
+        $addr_model    = new waContactAddressesModel();
+        $param_model   = new waContactParamsModel();
+        $plugin        = wa('shop')->getPlugin('depersonalizer');
+
         foreach (array_keys($contact_ids) as $cid) {
-            $has_new = $order_model->query("SELECT 1 FROM shop_order WHERE contact_id = i:cid AND create_datetime >= s:cutoff LIMIT 1", array('cid' => $cid, 'cutoff' => $cutoff))->fetch();
+            $has_new = $order_model->query(
+                "SELECT 1 FROM shop_order WHERE contact_id = i:cid AND create_datetime >= s:cutoff LIMIT 1",
+                array('cid' => $cid, 'cutoff' => $cutoff)
+            )->fetch();
             if ($has_new) {
                 continue;
             }
-            $contact_model->updateById($cid, array(
-                'firstname'  => _wp('Удалено'),
-                'middlename' => '',
-                'lastname'   => _wp('Удалено'),
-            ));
-            $email_model->updateByField('contact_id', $cid, array('email' => 'anon+'.$cid.'@example.invalid'));
-            $phone_model->updateByField(array('contact_id' => $cid, 'field' => 'phone'), array('value' => 'anon-'.sha1($cid)));
-            $addr_model->deleteByField('contact_id', $cid);
-            $param_model->set($cid, 'depersonalized', 1);
-            $param_model->set($cid, 'depersonalized_at', date('Y-m-d H:i:s'));
+
+            $is_depersonalized = $param_model->query(
+                "SELECT 1 FROM wa_contact_params WHERE contact_id = i:cid AND name = 'depersonalized' AND value = 1 LIMIT 1",
+                array('cid' => $cid)
+            )->fetch();
+            if ($is_depersonalized) {
+                $plugin->log(sprintf('Skipping contact %d: already depersonalized', $cid));
+                continue;
+            }
+
+            $contact_model->exec('BEGIN');
+            try {
+                $contact_model->updateById($cid, array(
+                    'firstname'  => _wp('Удалено'),
+                    'middlename' => '',
+                    'lastname'   => _wp('Удалено'),
+                ));
+                $email_model->updateByField('contact_id', $cid, array('email' => 'anon+'.$cid.'@example.invalid'));
+                $phone_model->updateByField(array('contact_id' => $cid, 'field' => 'phone'), array('value' => 'anon-'.sha1($cid)));
+                $addr_model->deleteByField('contact_id', $cid);
+                $param_model->set($cid, 'depersonalized', 1);
+                $param_model->set($cid, 'depersonalized_at', date('Y-m-d H:i:s'));
+                $contact_model->exec('COMMIT');
+            } catch (Exception $e) {
+                $contact_model->exec('ROLLBACK');
+                $plugin->log(sprintf('Failed to depersonalize contact %d: %s', $cid, $e->getMessage()));
+            }
         }
     }
 
