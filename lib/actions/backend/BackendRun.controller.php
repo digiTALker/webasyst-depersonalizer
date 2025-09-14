@@ -47,7 +47,7 @@ class shopDepersonalizerPluginBackendRunController extends waJsonController
         $anonymize_contact_id = waRequest::post('anonymize_contact_id', 0, waRequest::TYPE_INT);
         $offset = waRequest::post('offset', 0, waRequest::TYPE_INT);
         $limit  = waRequest::post('limit', 50, waRequest::TYPE_INT);
-        $exclude_keys = waRequest::post('exclude', array());
+        $include_keys = waRequest::post('keys', array());
 
         $cutoff = date('Y-m-d H:i:s', strtotime("-{$days} days"));
         $order_model = new shopOrderModel();
@@ -60,7 +60,7 @@ class shopDepersonalizerPluginBackendRunController extends waJsonController
             ->offset($offset)
             ->fetchAll();
 
-        $this->processOrders($orders, $keep_geo, $wipe_comments, $anonymize_contact_id, $exclude_keys);
+        $this->processOrders($orders, $keep_geo, $wipe_comments, $anonymize_contact_id, $include_keys);
         $this->processContacts($orders, $cutoff);
 
         $processed = count($orders);
@@ -77,7 +77,7 @@ class shopDepersonalizerPluginBackendRunController extends waJsonController
         }
     }
 
-    protected function processOrders(array $orders, $keep_geo, $wipe_comments, $anonymize_contact_id, array $exclude_keys = array())
+    protected function processOrders(array $orders, $keep_geo, $wipe_comments, $anonymize_contact_id, array $include_keys = array())
     {
         $params_model = new shopOrderParamsModel();
         $plugin = wa('shop')->getPlugin('depersonalizer');
@@ -86,7 +86,10 @@ class shopDepersonalizerPluginBackendRunController extends waJsonController
             if (ifset($params['depersonalized'], 0)) {
                 continue;
             }
-            $pii_keys = array_diff($plugin->detectPIIKeys($params), $exclude_keys);
+            $pii_keys = $plugin->detectPIIKeys($params);
+            if ($include_keys) {
+                $pii_keys = array_intersect($pii_keys, $include_keys);
+            }
             foreach ($pii_keys as $k) {
                 if (in_array($k, array('depersonalized', 'depersonalized_at'))) {
                     continue;

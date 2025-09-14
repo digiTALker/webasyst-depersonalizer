@@ -48,7 +48,7 @@
                 if (resp.data.keys && resp.data.keys.length) {
                     var html = '';
                     $.each(resp.data.keys, function(i, k) {
-                        html += '<label><input type="checkbox" name="exclude[]" value="' + k + '"> ' + k + '</label><br>';
+                        html += '<label><input type="checkbox" name="keys[]" value="' + k + '" checked> ' + k + '</label><br>';
                     });
                     keys_container.html(html);
                     keys_wrapper.show();
