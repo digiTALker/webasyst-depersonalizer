@@ -22,11 +22,13 @@ class shopDepersonalizerPlugin extends shopPlugin
         // shipping details
         'shipping_firstname', 'shipping_middlename', 'shipping_lastname',
         'shipping_name', 'shipping_company', 'shipping_email', 'shipping_phone',
-        'shipping_zip', 'shipping_city', 'shipping_region', 'shipping_street', 'shipping_house',
+        'shipping_zip', 'shipping_city', 'shipping_region', 'shipping_street', 'shipping_house', 'shipping_country',
         // billing details
         'billing_firstname', 'billing_middlename', 'billing_lastname',
         'billing_name', 'billing_company', 'billing_email', 'billing_phone',
-        'billing_zip', 'billing_city', 'billing_region', 'billing_street', 'billing_house'
+        'billing_zip', 'billing_city', 'billing_region', 'billing_street', 'billing_house', 'billing_country',
+        // tracking parameters
+        'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content'
     );
 
     /**
@@ -38,6 +40,24 @@ class shopDepersonalizerPlugin extends shopPlugin
     public function isPIIKey($key)
     {
         return in_array($key, $this->pii_keys) || preg_match('/(name|email|phone|address|zip|city|region|street|house)/i', $key);
+    }
+
+    /**
+     * Detect PII keys within given params combining with static list.
+     *
+     * @param array $params
+     * @return array
+     */
+    public function detectPIIKeys($params)
+    {
+        $detected = array();
+        foreach ($params as $k => $v) {
+            if (preg_match('/(name|email|phone|address|zip|city|region|street|house)/i', $k)) {
+                $detected[] = $k;
+            }
+        }
+        $static = array_intersect($this->pii_keys, array_keys($params));
+        return array_values(array_unique(array_merge($static, $detected)));
     }
 
     /**

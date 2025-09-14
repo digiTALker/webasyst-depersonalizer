@@ -12,6 +12,7 @@
         keep_geo: {$options.keep_geo|escape:'javascript'},
         wipe_comments: {$options.wipe_comments|escape:'javascript'},
         anonymize_contact_id: {$options.anonymize_contact_id|escape:'javascript'},
+        exclude: {$options.exclude|@json_encode},
         _csrf: '{$options._csrf|escape:'javascript'}'
     };
     var offset = 0;

@@ -20,6 +20,7 @@ class shopDepersonalizerPluginBackendRunAction extends waViewAction
             'keep_geo'             => waRequest::post('keep_geo', 0, waRequest::TYPE_INT),
             'wipe_comments'        => waRequest::post('wipe_comments', 0, waRequest::TYPE_INT),
             'anonymize_contact_id' => waRequest::post('anonymize_contact_id', 0, waRequest::TYPE_INT),
+            'exclude'              => waRequest::post('exclude', array()),
             '_csrf'                => $csrf,
         );
 
