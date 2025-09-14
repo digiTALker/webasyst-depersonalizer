@@ -1,0 +1,43 @@
+<div class="block" id="depersonalizer-run">
+    <h1>AnonGuard</h1>
+    <div class="progressbar" style="height:20px;">
+        <div class="bar" style="width:0%;"></div>
+    </div>
+    <p class="progress-text"></p>
+</div>
+<script type="text/javascript">
+(function($) {
+    var opts = {
+        days: {$options.days|escape:'javascript'},
+        keep_geo: {$options.keep_geo|escape:'javascript'},
+        wipe_comments: {$options.wipe_comments|escape:'javascript'},
+        anonymize_contact_id: {$options.anonymize_contact_id|escape:'javascript'},
+        _csrf: '{$options._csrf|escape:'javascript'}'
+    };
+    var offset = 0;
+    var limit = 50;
+    var bar = $('#depersonalizer-run .bar');
+    var text = $('#depersonalizer-run .progress-text');
+    function step() {
+        var data = $.extend({}, opts, {offset: offset, limit: limit});
+        $.post('?plugin=depersonalizer&module=run&action=run', data, function(resp) {
+            if (resp.status === 'ok') {
+                var d = resp.data;
+                offset = d.offset;
+                var percent = d.total ? Math.round(offset / d.total * 100) : 100;
+                if (percent > 100) { percent = 100; }
+                bar.css('width', percent + '%');
+                if (d.done) {
+                    text.text(d.message || '');
+                } else {
+                    text.text(offset + ' / ' + d.total);
+                    step();
+                }
+            } else {
+                text.text(resp.error || 'Error');
+            }
+        }, 'json');
+    }
+    step();
+})(jQuery);
+</script>

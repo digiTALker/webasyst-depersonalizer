@@ -5,16 +5,16 @@
     <form id="depersonalizer-form" method="post">
         <div class="field">
             <div class="name"><label for="days">{_wp('Retention days')}</label></div>
-            <div class="value"><input type="number" name="days" id="days" value="{$settings.retention_days}"></div>
+            <div class="value">{$fields.days}</div>
         </div>
         <div class="field">
-            <div class="value"><label><input type="checkbox" name="keep_geo" value="1"{if $settings.keep_geo} checked{/if}> {_wp('Keep geo statistics')}</label></div>
+            <div class="value"><label>{$fields.keep_geo} {_wp('Keep geo statistics')}</label></div>
         </div>
         <div class="field">
-            <div class="value"><label><input type="checkbox" name="wipe_comments" value="1"{if $settings.wipe_comments} checked{/if}> {_wp('Wipe order comments')}</label></div>
+            <div class="value"><label>{$fields.wipe_comments} {_wp('Wipe order comments')}</label></div>
         </div>
         <div class="field">
-            <div class="value"><label><input type="checkbox" name="anonymize_contact_id" value="1"{if $settings.anonymize_contact_id} checked{/if}> {_wp('Replace contact_id with anonymous contact')}</label></div>
+            <div class="value"><label>{$fields.anonymize_contact_id} {_wp('Replace contact_id with anonymous contact')}</label></div>
         </div>
         {$wa->csrf()}
         <div class="field">
@@ -32,8 +32,8 @@
 (function($) {
     var form = $('#depersonalizer-form');
     var output = $('#depersonalizer-output');
-    function send(action) {
-        $.post('?plugin=depersonalizer&module=run&action=' + action, form.serialize(), function(resp) {
+    function preview() {
+        $.post('?plugin=depersonalizer&module=run&action=preview', form.serialize(), function(resp) {
             if (resp && resp.data && resp.data.message) {
                 output.text(resp.data.message);
             } else if (resp && resp.message) {
@@ -43,7 +43,9 @@
             }
         }, 'json');
     }
-    form.find('.preview').on('click', function() { send('preview'); });
-    form.find('.run').on('click', function() { send('run'); });
+    form.find('.preview').on('click', preview);
+    form.find('.run').on('click', function() {
+        output.load('?plugin=depersonalizer&action=run', form.serialize());
+    });
 })(jQuery);
 </script>
