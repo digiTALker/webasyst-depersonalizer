@@ -53,22 +53,20 @@ class shopDepersonalizerPluginBackendRunController extends waJsonController
 
         $limit = waRequest::post('limit', 200, waRequest::TYPE_INT);
         $limit = max(1, min(500, $limit));
-        $offset = 0;
-        $processed = 0;
+        $offset = waRequest::post('offset', 0, waRequest::TYPE_INT);
 
         $plugin = wa('shop')->getPlugin('depersonalizer');
         $tm = new waModel();
 
-        while (true) {
-            $orders = $order_model->select('id, contact_id')
-                ->where('create_datetime < ?', $cutoff)
-                ->order('id')
-                ->limit($limit)
-                ->offset($offset)
-                ->fetchAll();
-            if (!$orders) {
-                break;
-            }
+        $orders = $order_model->select('id, contact_id')
+            ->where('create_datetime < ?', $cutoff)
+            ->order('id')
+            ->limit($limit)
+            ->offset($offset)
+            ->fetchAll();
+
+        $batch_count = count($orders);
+        if ($batch_count) {
             try {
                 $tm->exec('BEGIN');
                 $this->processOrders($orders, $keep_geo, $wipe_comments, $anonymize_contact_id, $include_keys);
@@ -79,44 +77,63 @@ class shopDepersonalizerPluginBackendRunController extends waJsonController
                 $plugin->log('Batch failed at offset '.$offset.': '.$e->getMessage());
                 throw $e;
             }
-
-            $batch_count = count($orders);
-            $processed += $batch_count;
             $offset += $batch_count;
-            $plugin->log(sprintf('Processed %d/%d orders', $processed, $total));
+            $plugin->log(sprintf('Processed %d/%d orders', $offset, $total));
         }
 
         $this->response = array(
-            'offset'    => $processed,
+            'offset'    => $offset,
             'total'     => $total,
-            'processed' => $processed,
-            'done'      => ($processed >= $total),
-            'message'   => _wp('Depersonalization completed'),
+            'processed' => $offset,
+            'done'      => ($offset >= $total),
+            'message'   => ($offset >= $total) ? _wp('Depersonalization completed') : '',
         );
     }
 
     protected function processOrders(array $orders, $keep_geo, $wipe_comments, $anonymize_contact_id, array $include_keys = array())
     {
         $params_model = new shopOrderParamsModel();
-        $plugin = wa('shop')->getPlugin('depersonalizer');
+        $order_model  = new shopOrderModel();
+        $plugin       = wa('shop')->getPlugin('depersonalizer');
+        $anon_cid     = null;
+        if ($anonymize_contact_id) {
+            $anon_cid = $plugin->getAnonContactId();
+        }
         foreach ($orders as $o) {
             $params = $params_model->get($o['id']);
             if (ifset($params['depersonalized'], 0)) {
                 continue;
             }
-            $pii_keys = $plugin->detectPIIKeys($params);
-            if ($include_keys) {
-                $pii_keys = array_intersect($pii_keys, $include_keys);
+
+            if ($keep_geo) {
+                foreach (array('country', 'region', 'city') as $gk) {
+                    foreach (array('', 'shipping_', 'billing_') as $prefix) {
+                        $src_key = $prefix.$gk;
+                        if (!empty($params[$src_key])) {
+                            $params_model->set($o['id'], 'geo_'.$gk, $params[$src_key]);
+                            break;
+                        }
+                    }
+                }
             }
-            foreach ($pii_keys as $k) {
+
+            foreach ($params as $k => $v) {
                 if (in_array($k, array('depersonalized', 'depersonalized_at'))) {
                     continue;
                 }
-                if (!array_key_exists($k, $params)) {
+                if ($include_keys && !in_array($k, $include_keys)) {
                     continue;
                 }
-                $params_model->set($o['id'], $k, $this->maskParam($k, $params[$k], $o['id']));
+                if (!$plugin->isPIIKey($k)) {
+                    continue;
+                }
+                $params_model->set(
+                    $o['id'],
+                    $k,
+                    $this->maskParam($k, $v, $o['id'], $anonymize_contact_id ? $anon_cid : null)
+                );
             }
+
             if ($wipe_comments) {
                 foreach (array('comment', 'customer_comment') as $c_key) {
                     if (isset($params[$c_key])) {
@@ -124,6 +141,11 @@ class shopDepersonalizerPluginBackendRunController extends waJsonController
                     }
                 }
             }
+
+            if ($anonymize_contact_id && !empty($o['contact_id'])) {
+                $order_model->updateById($o['id'], array('contact_id' => $anon_cid));
+            }
+
             $params_model->set($o['id'], 'depersonalized', 1);
             $params_model->set($o['id'], 'depersonalized_at', date('Y-m-d H:i:s'));
         }
@@ -186,8 +208,11 @@ class shopDepersonalizerPluginBackendRunController extends waJsonController
         }
     }
 
-    protected function maskParam($key, $value, $order_id)
+    protected function maskParam($key, $value, $order_id, $anon_contact_id = null)
     {
+        if ($anon_contact_id !== null && $key === 'contact_id') {
+            return $anon_contact_id;
+        }
         if (preg_match('/email/i', $key)) {
             return 'anon+'.$order_id.'@example.invalid';
         }
