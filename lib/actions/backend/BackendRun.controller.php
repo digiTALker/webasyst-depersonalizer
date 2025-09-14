@@ -21,9 +21,21 @@ class shopDepersonalizerPluginBackendRunController extends waJsonController
         $cutoff = date('Y-m-d H:i:s', strtotime("-{$days} days"));
         $order_model = new shopOrderModel();
         $count = (int)$order_model->select('COUNT(*)')->where('create_datetime < ?', $cutoff)->fetchField();
+
+        $params_model = new shopOrderParamsModel();
+        $rows = $params_model->query(
+            "SELECT DISTINCT op.name FROM shop_order_params op JOIN shop_order o ON o.id = op.order_id WHERE o.create_datetime < s:cutoff",
+            array('cutoff' => $cutoff)
+        )->fetchAll(null, true);
+        $params = array_fill_keys($rows, '');
+        $plugin = wa('shop')->getPlugin('depersonalizer');
+        $keys = $plugin->detectPIIKeys($params);
+        sort($keys);
+
         $this->response = array(
             'message' => sprintf(_wp('%d orders will be depersonalized'), $count),
             'count'   => $count,
+            'keys'    => $keys,
         );
     }
 
@@ -35,6 +47,7 @@ class shopDepersonalizerPluginBackendRunController extends waJsonController
         $anonymize_contact_id = waRequest::post('anonymize_contact_id', 0, waRequest::TYPE_INT);
         $offset = waRequest::post('offset', 0, waRequest::TYPE_INT);
         $limit  = waRequest::post('limit', 50, waRequest::TYPE_INT);
+        $exclude_keys = waRequest::post('exclude', array());
 
         $cutoff = date('Y-m-d H:i:s', strtotime("-{$days} days"));
         $order_model = new shopOrderModel();
@@ -47,7 +60,7 @@ class shopDepersonalizerPluginBackendRunController extends waJsonController
             ->offset($offset)
             ->fetchAll();
 
-        $this->processOrders($orders, $keep_geo, $wipe_comments, $anonymize_contact_id);
+        $this->processOrders($orders, $keep_geo, $wipe_comments, $anonymize_contact_id, $exclude_keys);
         $this->processContacts($orders, $cutoff);
 
         $processed = count($orders);
@@ -64,7 +77,7 @@ class shopDepersonalizerPluginBackendRunController extends waJsonController
         }
     }
 
-    protected function processOrders(array $orders, $keep_geo, $wipe_comments, $anonymize_contact_id)
+    protected function processOrders(array $orders, $keep_geo, $wipe_comments, $anonymize_contact_id, array $exclude_keys = array())
     {
         $params_model = new shopOrderParamsModel();
         $plugin = wa('shop')->getPlugin('depersonalizer');
@@ -73,15 +86,15 @@ class shopDepersonalizerPluginBackendRunController extends waJsonController
             if (ifset($params['depersonalized'], 0)) {
                 continue;
             }
-            foreach ($params as $k => $v) {
+            $pii_keys = array_diff($plugin->detectPIIKeys($params), $exclude_keys);
+            foreach ($pii_keys as $k) {
                 if (in_array($k, array('depersonalized', 'depersonalized_at'))) {
                     continue;
                 }
-                $is_pii = in_array($k, $plugin->getPIIKeys()) || preg_match('/(name|email|phone|address|zip|city|region|street|house)/i', $k);
-                if (!$is_pii) {
+                if (!array_key_exists($k, $params)) {
                     continue;
                 }
-                $params_model->set($o['id'], $k, $this->maskParam($k, $v, $o['id']));
+                $params_model->set($o['id'], $k, $this->maskParam($k, $params[$k], $o['id']));
             }
             if ($wipe_comments) {
                 foreach (array('comment', 'customer_comment') as $c_key) {

@@ -16,6 +16,10 @@
         <div class="field">
             <div class="value"><label>{$fields.anonymize_contact_id} {_wp('Replace contact_id with anonymous contact')}</label></div>
         </div>
+        <div class="field" id="exclude-keys" style="display:none;">
+            <div class="name">{_wp('Exclude keys')}</div>
+            <div class="value" id="exclude-keys-container"></div>
+        </div>
         {$wa->csrf()}
         <div class="field">
             <div class="value">
@@ -34,12 +38,29 @@
     var output = $('#depersonalizer-output');
     function preview() {
         $.post('?plugin=depersonalizer&module=run&action=preview', form.serialize(), function(resp) {
-            if (resp && resp.data && resp.data.message) {
-                output.text(resp.data.message);
+            var keys_wrapper = $('#exclude-keys');
+            var keys_container = $('#exclude-keys-container');
+            keys_container.empty();
+            if (resp && resp.data) {
+                if (resp.data.message) {
+                    output.text(resp.data.message);
+                }
+                if (resp.data.keys && resp.data.keys.length) {
+                    var html = '';
+                    $.each(resp.data.keys, function(i, k) {
+                        html += '<label><input type="checkbox" name="exclude[]" value="' + k + '"> ' + k + '</label><br>';
+                    });
+                    keys_container.html(html);
+                    keys_wrapper.show();
+                } else {
+                    keys_wrapper.hide();
+                }
             } else if (resp && resp.message) {
                 output.text(resp.message);
+                keys_wrapper.hide();
             } else {
-                output.text(resp.error || '');
+                output.text(resp ? resp.error || '' : '');
+                keys_wrapper.hide();
             }
         }, 'json');
     }
