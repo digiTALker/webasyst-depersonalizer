@@ -21,20 +21,17 @@ class shopDepersonalizerCli extends waCliController
     {
         $options = $this->parseOptions();
 
-        $settings_model = new waAppSettingsModel();
-        $settings = array(
-            'retention_days'       => (int)$settings_model->get('shop', 'depersonalizer.retention_days'),
-            'keep_geo'             => (int)$settings_model->get('shop', 'depersonalizer.keep_geo'),
-            'wipe_comments'        => (int)$settings_model->get('shop', 'depersonalizer.wipe_comments'),
-            'anonymize_contact_id' => (int)$settings_model->get('shop', 'depersonalizer.anonymize_contact_id'),
-        );
+        $plugin = wa('shop')->getPlugin('depersonalizer');
+        $settings = $plugin ? (array)$plugin->getSettings() : array();
 
-        $days = (int)ifset($options['days'], $settings['retention_days'] ?: $this->default_days);
+        $days = (int)ifset($options['days'], (int)ifset($settings['retention_days'], $this->default_days));
         $apply = !empty($options['apply']);
         $dry_run = !empty($options['dry-run']) || !$apply;
-        $keep_geo = isset($options['keep-geo']) ? (bool)$options['keep-geo'] : (bool)$settings['keep_geo'];
-        $wipe_comments = isset($options['wipe-comments']) ? (bool)$options['wipe-comments'] : (bool)$settings['wipe_comments'];
-        $anonymize_contact_id = isset($options['anonymize-contact-id']) ? (bool)$options['anonymize-contact-id'] : (bool)$settings['anonymize_contact_id'];
+        $keep_geo = isset($options['keep-geo']) ? (bool)$options['keep-geo'] : !empty($settings['keep_geo']);
+        $wipe_comments = isset($options['wipe-comments']) ? (bool)$options['wipe-comments'] : !empty($settings['wipe_comments']);
+        $anonymize_contact_id = isset($options['anonymize-contact-id']) ? (bool)$options['anonymize-contact-id'] : !empty($settings['anonymize_contact_id']);
+
+        $settings_model = new waAppSettingsModel();
 
         $cutoff = date('Y-m-d H:i:s', strtotime("-{$days} days"));
         $this->log("Starting depersonalization for orders before {$cutoff}. Mode: " . ($dry_run ? 'dry-run' : 'apply'));
