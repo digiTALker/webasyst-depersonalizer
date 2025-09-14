@@ -14,6 +14,7 @@ class shopDepersonalizerPluginInstall
             'depersonalizer.anonymize_contact_id' => 0,
             'depersonalizer.anon_contact_id'    => null,
             'depersonalizer.last_run_at'        => null,
+            'depersonalizer.last_log_path'      => null,
         );
         foreach ($defaults as $key => $value) {
             if ($app_settings_model->get('shop', $key) === null) {
