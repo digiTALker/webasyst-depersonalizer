@@ -67,8 +67,20 @@
         }, 'json');
     }
     form.find('.preview').on('click', preview);
+    var serverErrorText = {_wp('Server error')|json_encode};
     form.find('.run').on('click', function() {
-        output.load('?plugin=depersonalizer&action=run', form.serialize());
+        output.html('<i class="icon16 loading"></i>');
+        $.post('?plugin=depersonalizer&action=run', form.serialize(), function(html) {
+            output.html(html);
+        }, 'html').fail(function(xhr) {
+            var message = serverErrorText;
+            if (xhr.responseJSON && xhr.responseJSON.error) {
+                message = xhr.responseJSON.error;
+            } else if (xhr.responseText) {
+                message = xhr.responseText;
+            }
+            output.empty().append($('<div class="errormsg"></div>').text(message));
+        });
     });
 })(jQuery);
 </script>
