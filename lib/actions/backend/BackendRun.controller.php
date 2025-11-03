@@ -45,7 +45,7 @@ class shopDepersonalizerPluginBackendRunController extends waJsonController
         $keep_geo = waRequest::post('keep_geo', 0, waRequest::TYPE_INT);
         $wipe_comments = waRequest::post('wipe_comments', 0, waRequest::TYPE_INT);
         $anonymize_contact_id = waRequest::post('anonymize_contact_id', 0, waRequest::TYPE_INT);
-        $include_keys = waRequest::post('keys', array());
+        $include_keys = waRequest::post('keys', array(), waRequest::TYPE_ARRAY_TRIM);
 
         $cutoff = date('Y-m-d H:i:s', strtotime("-{$days} days"));
         $order_model = new shopOrderModel();

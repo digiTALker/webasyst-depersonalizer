@@ -9,4 +9,10 @@ return array(
     'Wipe order comments' => 'Очищать комментарии к заказам',
     'Replace contact_id with anonymous contact' => 'Заменять contact_id на анонимный контакт',
     'Удалено' => 'Удалено',
+    'Configure depersonalization and run below.' => 'Настройте параметры обезличивания и запустите процесс.',
+    '%d orders will be depersonalized' => 'Будет обезличено заказов: %d',
+    'Depersonalization completed' => 'Обезличивание завершено',
+    'Server error' => 'Ошибка сервера',
+    'Anonymous' => 'Анонимный',
+    'Customer' => 'Покупатель',
 );
