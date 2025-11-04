@@ -45,8 +45,14 @@ class shopDepersonalizerPluginBackendRunController extends waJsonController
         $keep_geo = waRequest::post('keep_geo', 0, waRequest::TYPE_INT);
         $wipe_comments = waRequest::post('wipe_comments', 0, waRequest::TYPE_INT);
         $anonymize_contact_id = waRequest::post('anonymize_contact_id', 0, waRequest::TYPE_INT);
+        $plugin = wa('shop')->getPlugin('depersonalizer');
+
         $include_keys = waRequest::post('keys', array(), waRequest::TYPE_ARRAY_TRIM);
-        $keys_selected = waRequest::post('keys_selected', 0, waRequest::TYPE_INT);
+        $include_keys = array_values(array_unique(array_filter($include_keys, 'strlen')));
+        if ($include_keys) {
+            $include_keys = array_values(array_filter($include_keys, array($plugin, 'isPIIKey')));
+        }
+        $keys_selected = waRequest::post('keys_selected', 0, waRequest::TYPE_INT) ? 1 : 0;
 
         $cutoff = date('Y-m-d H:i:s', strtotime("-{$days} days"));
         $order_model = new shopOrderModel();
@@ -56,7 +62,6 @@ class shopDepersonalizerPluginBackendRunController extends waJsonController
         $limit = max(1, min(500, $limit));
         $offset = waRequest::post('offset', 0, waRequest::TYPE_INT);
 
-        $plugin = wa('shop')->getPlugin('depersonalizer');
         $tm = new waModel();
 
         $orders = $order_model->select('id, contact_id')

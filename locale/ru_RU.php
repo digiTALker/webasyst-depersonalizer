@@ -18,6 +18,8 @@ return array(
     '%d orders will be depersonalized' => 'Будет обезличено заказов: %d',
     'Depersonalization completed' => 'Обезличивание завершено',
     'Server error' => 'Ошибка сервера',
+    'Preview' => 'Предпросмотр',
+    'Run' => 'Запустить',
     'Loading preview...' => 'Загрузка предварительного просмотра...',
     'Preview completed. Review the data below before running the process.' => 'Предпросмотр готов. Проверьте данные ниже перед запуском процесса.',
     'No orders match the selected retention period.' => 'Нет заказов, подпадающих под выбранный срок хранения.',

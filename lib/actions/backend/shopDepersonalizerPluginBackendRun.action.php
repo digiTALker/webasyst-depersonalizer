@@ -15,12 +15,21 @@ class shopDepersonalizerPluginBackendRunAction extends waViewAction
             throw new waException('CSRF token invalid');
         }
 
+        $plugin = wa('shop')->getPlugin('depersonalizer');
+
+        $keys = waRequest::post('keys', array(), waRequest::TYPE_ARRAY_TRIM);
+        $keys = array_values(array_unique(array_filter($keys, 'strlen')));
+        if ($keys) {
+            $keys = array_values(array_filter($keys, array($plugin, 'isPIIKey')));
+        }
+
         $options = array(
             'days'                 => waRequest::post('days', 365, waRequest::TYPE_INT),
             'keep_geo'             => waRequest::post('keep_geo', 0, waRequest::TYPE_INT),
             'wipe_comments'        => waRequest::post('wipe_comments', 0, waRequest::TYPE_INT),
             'anonymize_contact_id' => waRequest::post('anonymize_contact_id', 0, waRequest::TYPE_INT),
-            'keys'                 => waRequest::post('keys', array(), waRequest::TYPE_ARRAY_TRIM),
+            'keys'                 => $keys,
+            'keys_selected'        => waRequest::post('keys_selected', 0, waRequest::TYPE_INT) ? 1 : 0,
             '_csrf'                => $csrf,
         );
         $settings_model = new waAppSettingsModel();

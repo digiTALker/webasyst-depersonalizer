@@ -13,6 +13,7 @@
         wipe_comments: {$options.wipe_comments|escape:'javascript'},
         anonymize_contact_id: {$options.anonymize_contact_id|escape:'javascript'},
         keys: {$options.keys|@json_encode},
+        keys_selected: {$options.keys_selected|escape:'javascript'},
         _csrf: '{$options._csrf|escape:'javascript'}'
     };
     var offset = 0;

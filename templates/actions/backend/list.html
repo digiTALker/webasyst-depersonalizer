@@ -88,6 +88,14 @@
     var lastRunTemplate = {_wp('Last depersonalization run: %s')|json_encode};
     var noRunsText = {_wp('Depersonalization has not been executed yet.')|json_encode};
 
+    function resetPreviewState() {
+        previewContainer.hide();
+        previewSummary.empty();
+        previewKeys.empty();
+        previewHint.hide();
+        previewEmpty.hide();
+    }
+
     function setMessage(type, text) {
         messages.empty();
         if (!text) {
@@ -132,6 +140,7 @@
         toggleButtons(true);
         keysSelectedFlag.val('0');
         setMessage('info', loadingPreviewText);
+        resetPreviewState();
         $.post('?plugin=depersonalizer&module=run&action=preview', form.serialize(), function(resp) {
             toggleButtons(false);
             if (resp && resp.status === 'ok' && resp.data) {
@@ -148,7 +157,7 @@
                 }
             } else {
                 runButton.prop('disabled', true);
-                previewContainer.hide();
+                resetPreviewState();
                 var errorText = serverErrorText;
                 if (resp) {
                     if (resp.errors && resp.errors.length) {
@@ -164,7 +173,7 @@
         }, 'json').fail(function(xhr) {
             toggleButtons(false);
             runButton.prop('disabled', true);
-            previewContainer.hide();
+            resetPreviewState();
             keysSelectedFlag.val('0');
             var message = serverErrorText;
             if (xhr.responseJSON && xhr.responseJSON.error) {
@@ -197,6 +206,14 @@
 
     form.find('.preview').on('click', preview);
     form.find('.run').on('click', startRun);
+
+    form.on('input change', 'input:not([name="keys[]"])', function() {
+        keysSelectedFlag.val('0');
+        runButton.prop('disabled', true);
+        resetPreviewState();
+        setMessage('info', '');
+        output.empty();
+    });
 
     $(document).on('depersonalizer:completed', function(event, payload) {
         toggleButtons(false);

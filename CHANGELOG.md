@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.1
+* Respect preview selections during batch execution by passing the flag to AJAX requests.
+* Sanitize submitted keys before rendering the progress page and when executing batches.
+* Provide Russian translations for the new Preview and Run buttons.
+
 ## 0.4.0
 * Add interactive backend interface with preview summaries, field selection and real-time progress updates.
 * Allow downloading the latest depersonalization batch log from the backend.

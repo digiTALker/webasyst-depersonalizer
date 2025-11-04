@@ -3,7 +3,7 @@
 return array(
     'name'               => 'AnonGuard — деперсонификация заказов и контактов',
     'vendor'             => 'incyber',
-    'version'            => '0.4.0',
+    'version'            => '0.4.1',
     'img'                => 'img/icon.png',
     'shop_version_from'  => '8.0',
     'shop_version_to'    => '',
