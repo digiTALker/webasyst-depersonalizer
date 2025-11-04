@@ -14,6 +14,14 @@ class shopDepersonalizerPluginBackendListAction extends waViewAction
         $plugin   = wa('shop')->getPlugin('depersonalizer');
         $settings = $plugin->getSettings();
 
+        $app_settings = new waAppSettingsModel();
+        $last_run_at = $app_settings->get('shop', 'depersonalizer.last_run_at');
+        $last_log_path = $app_settings->get('shop', 'depersonalizer.last_log_path');
+        $logs_root = wa()->getConfig()->getRootPath().'/wa-log/depersonalizer/';
+        if (!$last_log_path || strpos($last_log_path, $logs_root) !== 0 || !file_exists($last_log_path)) {
+            $last_log_path = null;
+        }
+
         // Build form controls for template
         $fields = array(
             'days' => waHtmlControl::getControl(waHtmlControl::INPUT, array(
@@ -42,9 +50,13 @@ class shopDepersonalizerPluginBackendListAction extends waViewAction
         );
 
         $this->view->assign(array(
-            'settings' => $settings,
-            'fields'   => $fields,
-            'message'  => _wp('Configure depersonalization and run below.'),
+            'settings'               => $settings,
+            'fields'                 => $fields,
+            'message'                => _wp('Configure depersonalization and run below.'),
+            'last_run_at'            => $last_run_at,
+            'last_run_at_formatted'  => $last_run_at ? waDateTime::format('humandatetime', $last_run_at) : null,
+            'last_log_path'          => $last_log_path,
+            'log_download_url'       => $last_log_path ? '?plugin=depersonalizer&module=log' : null,
         ));
     }
 }

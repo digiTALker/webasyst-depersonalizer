@@ -45,7 +45,8 @@ class shopDepersonalizerPluginBackendRunController extends waJsonController
         $keep_geo = waRequest::post('keep_geo', 0, waRequest::TYPE_INT);
         $wipe_comments = waRequest::post('wipe_comments', 0, waRequest::TYPE_INT);
         $anonymize_contact_id = waRequest::post('anonymize_contact_id', 0, waRequest::TYPE_INT);
-        $include_keys = waRequest::post('keys', array());
+        $include_keys = waRequest::post('keys', array(), waRequest::TYPE_ARRAY_TRIM);
+        $keys_selected = waRequest::post('keys_selected', 0, waRequest::TYPE_INT);
 
         $cutoff = date('Y-m-d H:i:s', strtotime("-{$days} days"));
         $order_model = new shopOrderModel();
@@ -66,6 +67,7 @@ class shopDepersonalizerPluginBackendRunController extends waJsonController
             ->fetchAll();
 
         $batch_count = count($orders);
+        $batch_log_path = null;
         if ($batch_count) {
             $processed_orders = $skipped_orders = $processed_contacts = $skipped_contacts = array();
             try {
@@ -75,7 +77,8 @@ class shopDepersonalizerPluginBackendRunController extends waJsonController
                     $keep_geo,
                     $wipe_comments,
                     $anonymize_contact_id,
-                    $include_keys
+                    $include_keys,
+                    $keys_selected
                 );
                 list($processed_contacts, $skipped_contacts) = $this->processContacts($orders, $cutoff);
                 $tm->exec('COMMIT');
@@ -89,8 +92,17 @@ class shopDepersonalizerPluginBackendRunController extends waJsonController
                 'orders'   => array('processed' => $processed_orders, 'skipped' => $skipped_orders),
                 'contacts' => array('processed' => $processed_contacts, 'skipped' => $skipped_contacts),
             ));
+            $batch_log_path = $path;
             $plugin->log('Batch details saved to '.$path);
             $plugin->log(sprintf('Processed %d/%d orders', $offset, $total));
+        }
+
+        $app_settings_model = new waAppSettingsModel();
+        $last_run_at = $app_settings_model->get('shop', 'depersonalizer.last_run_at');
+        $last_log_path = $batch_log_path ?: $app_settings_model->get('shop', 'depersonalizer.last_log_path');
+        $logs_root = wa()->getConfig()->getRootPath().'/wa-log/depersonalizer/';
+        if (!$last_log_path || strpos($last_log_path, $logs_root) !== 0 || !file_exists($last_log_path)) {
+            $last_log_path = null;
         }
 
         $this->response = array(
@@ -99,10 +111,13 @@ class shopDepersonalizerPluginBackendRunController extends waJsonController
             'processed' => $offset,
             'done'      => ($offset >= $total),
             'message'   => ($offset >= $total) ? _wp('Depersonalization completed') : '',
+            'last_run_at' => $last_run_at ? waDateTime::format('humandatetime', $last_run_at) : null,
+            'last_log_path' => $last_log_path,
+            'log_download_url' => $last_log_path ? '?plugin=depersonalizer&module=log' : null,
         );
     }
 
-    protected function processOrders(array $orders, $keep_geo, $wipe_comments, $anonymize_contact_id, array $include_keys = array())
+    protected function processOrders(array $orders, $keep_geo, $wipe_comments, $anonymize_contact_id, array $include_keys = array(), $keys_selected = 0)
     {
         $processed = array();
         $skipped   = array();
@@ -113,6 +128,9 @@ class shopDepersonalizerPluginBackendRunController extends waJsonController
         if ($anonymize_contact_id) {
             $anon_cid = $plugin->getAnonContactId();
         }
+        $include_keys = array_values(array_unique(array_filter($include_keys, 'strlen')));
+        $include_keys_map = $include_keys ? array_fill_keys($include_keys, true) : array();
+        $respect_selection = ($keys_selected > 0);
         foreach ($orders as $o) {
             $params = $params_model->get($o['id']);
             if (ifset($params['depersonalized'], 0)) {
@@ -136,7 +154,10 @@ class shopDepersonalizerPluginBackendRunController extends waJsonController
                 if (in_array($k, array('depersonalized', 'depersonalized_at'))) {
                     continue;
                 }
-                if ($include_keys && !in_array($k, $include_keys)) {
+                if ($respect_selection && !$include_keys_map) {
+                    continue;
+                }
+                if ($include_keys_map && !isset($include_keys_map[$k])) {
                     continue;
                 }
                 if (!$plugin->isPIIKey($k)) {

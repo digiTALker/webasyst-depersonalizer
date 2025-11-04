@@ -1,32 +1,63 @@
-<div class="block">
+<div class="block double-padded" id="depersonalizer">
     <h1>AnonGuard</h1>
-    <p>{$message}</p>
+    <p class="hint" id="depersonalizer-description">{$message}</p>
+
+    <div class="depersonalizer-meta">
+        <p class="hint" id="last-run-info">
+            {if $last_run_at_formatted}
+                {sprintf(_wp('Last depersonalization run: %s'), $last_run_at_formatted)}
+            {else}
+                {_wp('Depersonalization has not been executed yet.')}
+            {/if}
+        </p>
+        <p id="last-log-link"{if !$last_log_path} style="display:none;"{/if}>
+            <a href="{if $log_download_url}{$log_download_url|escape}{else}javascript:void(0);{/if}" class="inline-link"><i class="icon16 download"></i>{_wp('Download the last batch log')}</a>
+        </p>
+    </div>
+
+    <div id="depersonalizer-messages"></div>
 
     <form id="depersonalizer-form" method="post">
-        <div class="field">
-            <div class="name"><label for="days">{_wp('Retention days')}</label></div>
-            <div class="value">{$fields.days}</div>
-        </div>
-        <div class="field">
-            <div class="value"><label>{$fields.keep_geo} {_wp('Keep geo statistics')}</label></div>
-        </div>
-        <div class="field">
-            <div class="value"><label>{$fields.wipe_comments} {_wp('Wipe order comments')}</label></div>
-        </div>
-        <div class="field">
-            <div class="value">
-                <label>{$fields.anonymize_contact_id} {_wp('Replace contact_id with anonymous contact')}</label>
-            </div>
-        </div>
-        <div class="field" id="exclude-keys" style="display:none;">
-            <div class="name">{_wp('Exclude keys')}</div>
-            <div class="value" id="exclude-keys-container"></div>
-        </div>
         {$wa->csrf()}
-        <div class="field">
-            <div class="value">
-                <button type="button" class="preview btn">{_wp('Preview')}</button>
-                <button type="button" class="run btn green">{_wp('Run')}</button>
+        <input type="hidden" name="keys_selected" id="keys-selected-flag" value="0">
+        <div class="fields form">
+            <div class="field">
+                <div class="name"><label for="days">{_wp('Retention days')}</label></div>
+                <div class="value">
+                    {$fields.days}
+                    <p class="hint">{_wp('Orders and contacts older than this number of days will be depersonalized.')}</p>
+                </div>
+            </div>
+            <div class="field">
+                <div class="value checkbox-field"><label class="checkbox">{$fields.keep_geo} {_wp('Keep geo statistics')}</label>
+                    <p class="hint">{_wp('Preserve country, region and city information.')}</p>
+                </div>
+            </div>
+            <div class="field">
+                <div class="value checkbox-field"><label class="checkbox">{$fields.wipe_comments} {_wp('Wipe order comments')}</label>
+                    <p class="hint">{_wp('Remove order and customer comments stored with depersonalized orders.')}</p>
+                </div>
+            </div>
+            <div class="field">
+                <div class="value checkbox-field">
+                    <label class="checkbox">{$fields.anonymize_contact_id} {_wp('Replace contact_id with anonymous contact')}</label>
+                    <p class="hint">{_wp('Link depersonalized orders to a dedicated anonymous contact instead of the original customer.')}</p>
+                </div>
+            </div>
+            <div class="field" id="preview-container" style="display:none;">
+                <div class="name">{_wp('Preview results')}</div>
+                <div class="value">
+                    <div id="preview-summary" class="hint"></div>
+                    <div id="preview-keys" class="preview-keys"></div>
+                    <div id="preview-empty" class="hint" style="display:none;">{_wp('No personal data fields were detected for the selected period.')}</div>
+                    <p class="hint" id="preview-hint" style="display:none;">{_wp('Uncheck the fields you want to keep before running the depersonalization.')}</p>
+                </div>
+            </div>
+            <div class="field">
+                <div class="value buttons">
+                    <button type="button" class="preview btn"><i class="icon16 search"></i>{_wp('Preview')}</button>
+                    <button type="button" class="run btn green"><i class="icon16 play"></i>{_wp('Run')}</button>
+                </div>
             </div>
         </div>
     </form>
@@ -38,37 +69,158 @@
 (function($) {
     var form = $('#depersonalizer-form');
     var output = $('#depersonalizer-output');
-    function preview() {
-        $.post('?plugin=depersonalizer&module=run&action=preview', form.serialize(), function(resp) {
-            var keys_wrapper = $('#exclude-keys');
-            var keys_container = $('#exclude-keys-container');
-            keys_container.empty();
-            if (resp && resp.data) {
-                if (resp.data.message) {
-                    output.text(resp.data.message);
-                }
-                if (resp.data.keys && resp.data.keys.length) {
-                    var html = '';
-                    $.each(resp.data.keys, function(i, k) {
-                        html += '<label><input type="checkbox" name="keys[]" value="' + k + '" checked> ' + k + '</label><br>';
-                    });
-                    keys_container.html(html);
-                    keys_wrapper.show();
-                } else {
-                    keys_wrapper.hide();
-                }
-            } else if (resp && resp.message) {
-                output.text(resp.message);
-                keys_wrapper.hide();
-            } else {
-                output.text(resp ? resp.error || '' : '');
-                keys_wrapper.hide();
-            }
-        }, 'json');
+    var messages = $('#depersonalizer-messages');
+    var previewButton = form.find('.preview');
+    var runButton = form.find('.run');
+    var previewContainer = $('#preview-container');
+    var previewSummary = $('#preview-summary');
+    var previewKeys = $('#preview-keys');
+    var previewHint = $('#preview-hint');
+    var previewEmpty = $('#preview-empty');
+    var lastRunInfo = $('#last-run-info');
+    var lastLogLink = $('#last-log-link');
+    var keysSelectedFlag = $('#keys-selected-flag');
+
+    var serverErrorText = {_wp('Server error')|json_encode};
+    var loadingPreviewText = {_wp('Loading preview...')|json_encode};
+    var previewReadyText = {_wp('Preview completed. Review the data below before running the process.')|json_encode};
+    var previewEmptyText = {_wp('No orders match the selected retention period.')|json_encode};
+    var lastRunTemplate = {_wp('Last depersonalization run: %s')|json_encode};
+    var noRunsText = {_wp('Depersonalization has not been executed yet.')|json_encode};
+
+    function setMessage(type, text) {
+        messages.empty();
+        if (!text) {
+            return;
+        }
+        var className = 'infomsg';
+        if (type === 'error') {
+            className = 'errormsg';
+        } else if (type === 'success') {
+            className = 'successmsg';
+        }
+        $('<div></div>').addClass(className).text(text).appendTo(messages);
     }
+
+    function toggleButtons(disabled) {
+        previewButton.prop('disabled', disabled);
+        runButton.prop('disabled', disabled);
+    }
+
+    function renderKeys(keys) {
+        previewKeys.empty();
+        if (!keys || !keys.length) {
+            previewHint.hide();
+            previewEmpty.show();
+            return;
+        }
+        previewEmpty.hide();
+        previewHint.show();
+        $.each(keys, function(i, key) {
+            var label = $('<label class="checkbox"></label>');
+            var checkbox = $('<input type="checkbox" checked="checked" />')
+                .attr('name', 'keys[]')
+                .val(key);
+            label.append(checkbox);
+            label.append(document.createTextNode(' '));
+            label.append($('<span></span>').text(key));
+            $('<div class="preview-key"></div>').append(label).appendTo(previewKeys);
+        });
+    }
+
+    function preview() {
+        toggleButtons(true);
+        keysSelectedFlag.val('0');
+        setMessage('info', loadingPreviewText);
+        $.post('?plugin=depersonalizer&module=run&action=preview', form.serialize(), function(resp) {
+            toggleButtons(false);
+            if (resp && resp.status === 'ok' && resp.data) {
+                previewSummary.text(resp.data.message || '');
+                renderKeys(resp.data.keys || []);
+                previewContainer.show();
+                keysSelectedFlag.val('1');
+                if (resp.data.count) {
+                    runButton.prop('disabled', false);
+                    setMessage('success', previewReadyText);
+                } else {
+                    runButton.prop('disabled', true);
+                    setMessage('info', previewEmptyText);
+                }
+            } else {
+                runButton.prop('disabled', true);
+                previewContainer.hide();
+                var errorText = serverErrorText;
+                if (resp) {
+                    if (resp.errors && resp.errors.length) {
+                        errorText = resp.errors.join('\n');
+                    } else if (resp.message) {
+                        errorText = resp.message;
+                    } else if (resp.error) {
+                        errorText = resp.error;
+                    }
+                }
+                setMessage('error', errorText);
+            }
+        }, 'json').fail(function(xhr) {
+            toggleButtons(false);
+            runButton.prop('disabled', true);
+            previewContainer.hide();
+            keysSelectedFlag.val('0');
+            var message = serverErrorText;
+            if (xhr.responseJSON && xhr.responseJSON.error) {
+                message = xhr.responseJSON.error;
+            } else if (xhr.responseText) {
+                message = xhr.responseText;
+            }
+            setMessage('error', message);
+        });
+    }
+
+    function startRun() {
+        toggleButtons(true);
+        output.html('<i class="icon16 loading"></i>');
+        setMessage('info', '');
+        $.post('?plugin=depersonalizer&action=run', form.serialize(), function(html) {
+            output.html(html);
+        }, 'html').fail(function(xhr) {
+            toggleButtons(false);
+            var message = serverErrorText;
+            if (xhr.responseJSON && xhr.responseJSON.error) {
+                message = xhr.responseJSON.error;
+            } else if (xhr.responseText) {
+                message = xhr.responseText;
+            }
+            output.empty();
+            setMessage('error', message);
+        });
+    }
+
     form.find('.preview').on('click', preview);
-    form.find('.run').on('click', function() {
-        output.load('?plugin=depersonalizer&action=run', form.serialize());
+    form.find('.run').on('click', startRun);
+
+    $(document).on('depersonalizer:completed', function(event, payload) {
+        toggleButtons(false);
+        if (payload && payload.message) {
+            setMessage('success', payload.message);
+        }
+        if (payload) {
+            if (payload.last_run_at) {
+                lastRunInfo.text(lastRunTemplate.replace('%s', payload.last_run_at));
+            } else {
+                lastRunInfo.text(noRunsText);
+            }
+            if (payload.log_download_url) {
+                lastLogLink.show();
+                lastLogLink.find('a').attr('href', payload.log_download_url);
+            } else {
+                lastLogLink.hide();
+            }
+        }
+    });
+
+    $(document).on('depersonalizer:error', function(event, errorMessage) {
+        toggleButtons(false);
+        setMessage('error', errorMessage || serverErrorText);
     });
 })(jQuery);
 </script>

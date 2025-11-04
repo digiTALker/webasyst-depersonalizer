@@ -16,28 +16,58 @@
         _csrf: '{$options._csrf|escape:'javascript'}'
     };
     var offset = 0;
-    var limit = 50;
+    var limit = 200;
     var bar = $('#depersonalizer-run .bar');
     var text = $('#depersonalizer-run .progress-text');
+    var progressTemplate = {_wp('Processing %d of %d orders...')|json_encode};
+    var completedText = {_wp('Depersonalization completed')|json_encode};
+    var startingText = {_wp('Starting depersonalization...')|json_encode};
+    var serverErrorText = {_wp('Server error')|json_encode};
+
+    text.text(startingText);
+
     function step() {
         var data = $.extend({}, opts, {offset: offset, limit: limit});
         $.post('?plugin=depersonalizer&module=run&action=run', data, function(resp) {
-            if (resp.status === 'ok') {
+            if (resp && resp.status === 'ok' && resp.data) {
                 var d = resp.data;
                 offset = d.offset;
                 var percent = d.total ? Math.round(offset / d.total * 100) : 100;
                 if (percent > 100) { percent = 100; }
                 bar.css('width', percent + '%');
                 if (d.done) {
-                    text.text(d.message || '');
+                    text.text(d.message || completedText);
+                    $(document).trigger('depersonalizer:completed', d);
                 } else {
-                    text.text(offset + ' / ' + d.total);
-                    step();
+                    var total = d.total || 0;
+                    var message = progressTemplate.replace('%d', offset).replace('%d', total);
+                    text.text(message);
+                    setTimeout(step, 300);
                 }
             } else {
-                text.text(resp.error || 'Error');
+                var errorText = serverErrorText;
+                if (resp) {
+                    if (resp.errors && resp.errors.length) {
+                        errorText = resp.errors.join('\n');
+                    } else if (resp.message) {
+                        errorText = resp.message;
+                    } else if (resp.error) {
+                        errorText = resp.error;
+                    }
+                }
+                text.text(errorText);
+                $(document).trigger('depersonalizer:error', errorText);
             }
-        }, 'json');
+        }, 'json').fail(function(xhr) {
+            var message = serverErrorText;
+            if (xhr.responseJSON && xhr.responseJSON.error) {
+                message = xhr.responseJSON.error;
+            } else if (xhr.responseText) {
+                message = xhr.responseText;
+            }
+            text.text(message);
+            $(document).trigger('depersonalizer:error', message);
+        });
     }
     step();
 })(jQuery);
