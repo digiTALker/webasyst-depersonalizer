@@ -47,7 +47,7 @@ class shopDepersonalizerPluginBackendRunController extends waJsonController
         $anonymize_contact_id = waRequest::post('anonymize_contact_id', 0, waRequest::TYPE_INT);
         $offset = waRequest::post('offset', 0, waRequest::TYPE_INT);
         $limit  = waRequest::post('limit', 50, waRequest::TYPE_INT);
-        $include_keys = waRequest::post('keys', array());
+        $include_keys = waRequest::post('keys', false, waRequest::TYPE_ARRAY);
 
         $cutoff = date('Y-m-d H:i:s', strtotime("-{$days} days"));
         $order_model = new shopOrderModel();
@@ -77,7 +77,7 @@ class shopDepersonalizerPluginBackendRunController extends waJsonController
         }
     }
 
-    protected function processOrders(array $orders, $keep_geo, $wipe_comments, $anonymize_contact_id, array $include_keys = array())
+    protected function processOrders(array $orders, $keep_geo, $wipe_comments, $anonymize_contact_id, $include_keys = false)
     {
         $params_model = new shopOrderParamsModel();
         $plugin = wa('shop')->getPlugin('depersonalizer');
@@ -87,7 +87,7 @@ class shopDepersonalizerPluginBackendRunController extends waJsonController
                 continue;
             }
             $pii_keys = $plugin->detectPIIKeys($params);
-            if ($include_keys) {
+            if ($include_keys !== false) {
                 $pii_keys = array_intersect($pii_keys, $include_keys);
             }
             foreach ($pii_keys as $k) {
