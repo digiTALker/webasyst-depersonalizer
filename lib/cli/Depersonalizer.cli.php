@@ -78,18 +78,17 @@ class shopDepersonalizerCli extends waCliController
                 if (in_array($k, array('depersonalized', 'depersonalized_at'))) {
                     continue;
                 }
+                if (in_array($k, array('comment', 'customer_comment'))) {
+                    if ($wipe_comments) {
+                        $params_model->set($o['id'], $k, '');
+                    }
+                    continue;
+                }
                 $is_pii = in_array($k, $plugin->getPIIKeys()) || preg_match('/(name|email|phone|address|zip|city|region|street|house)/i', $k);
                 if (!$is_pii) {
                     continue;
                 }
                 $params_model->set($o['id'], $k, $this->maskParam($k, $v, $o['id']));
-            }
-            if ($wipe_comments) {
-                foreach (array('comment', 'customer_comment') as $c_key) {
-                    if (isset($params[$c_key])) {
-                        $params_model->set($o['id'], $c_key, '');
-                    }
-                }
             }
             $params_model->set($o['id'], 'depersonalized', 1);
             $params_model->set($o['id'], 'depersonalized_at', date('Y-m-d H:i:s'));
