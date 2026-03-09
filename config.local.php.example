@@ -1,0 +1,12 @@
+﻿<?php
+return array(
+    // Optional static credentials. If this file is absent, index.php tries wa-config/db.php automatically.
+    'driver'   => 'mysql',
+    'host'     => '127.0.0.1',
+    'port'     => 3306,
+    'database' => 'webasyst',
+    'user'     => 'db_user',
+    'password' => 'db_password',
+    'charset'  => 'utf8mb4',
+    // 'socket' => '/var/run/mysqld/mysqld.sock',
+);

@@ -1,12 +1,11 @@
-# Webasyst кеш и логи
-../../../../wa-cache/
-../../../../wa-log/
+﻿# Runtime logs produced by standalone tool
+logs/
 
-# IDE, ОС
+# Local connection override
+config.local.php
+
+# OS / editor files
 .DS_Store
 Thumbs.db
 *~
 *.swp
-
-# Локальные настройки
-config.local.php
