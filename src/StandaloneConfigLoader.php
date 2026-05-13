@@ -1,10 +1,10 @@
-﻿<?php
+<?php
 declare(strict_types=1);
 
 final class StandaloneConfigLoader
 {
     /**
-     * Load database configuration from local file first, then from Webasyst config.
+     * Load database configuration from Webasyst config and overlay local settings when present.
      *
      * @param string $baseDir Directory with this project.
      * @return array<string, mixed>
@@ -12,10 +12,11 @@ final class StandaloneConfigLoader
     public static function load(string $baseDir): array
     {
         $localPath = $baseDir . DIRECTORY_SEPARATOR . 'config.local.php';
+        $localConfig = null;
         if (is_file($localPath)) {
             $config = include $localPath;
             if (is_array($config)) {
-                return self::normalize($config);
+                $localConfig = self::expandLocalConfig($config);
             }
         }
 
@@ -25,11 +26,21 @@ final class StandaloneConfigLoader
             if (is_array($raw)) {
                 $candidate = self::pickConnection($raw);
                 if ($candidate !== null) {
-                    return self::normalize($candidate + array(
-                        '__source' => $waConfigPath,
-                    ));
+                    if ($localConfig !== null) {
+                        $candidate = array_replace($candidate, $localConfig);
+                        $candidate['__source'] = $localPath . ' + ' . $waConfigPath;
+                    } else {
+                        $candidate['__source'] = $waConfigPath;
+                    }
+
+                    return self::normalize($candidate);
                 }
             }
+        }
+
+        if ($localConfig !== null) {
+            $localConfig['__source'] = $localPath;
+            return self::normalize($localConfig);
         }
 
         return self::normalize(array(
@@ -79,11 +90,35 @@ final class StandaloneConfigLoader
     }
 
     /**
+     * @param array<string, mixed> $config
+     * @return array<int, string>
+     */
+    public static function missingRequiredKeys(array $config): array
+    {
+        $missing = array();
+
+        foreach (array('driver', 'database', 'user') as $key) {
+            if (!isset($config[$key]) || trim((string)$config[$key]) === '') {
+                $missing[] = $key;
+            }
+        }
+
+        $hasSocket = isset($config['socket']) && trim((string)$config['socket']) !== '';
+        $hasHost = isset($config['host']) && trim((string)$config['host']) !== '';
+        if (!$hasSocket && !$hasHost) {
+            $missing[] = 'host or socket';
+        }
+
+        return $missing;
+    }
+
+    /**
      * @param array<string, mixed> $raw
      * @return array<string, mixed>
      */
     private static function normalize(array $raw): array
     {
+        $raw = self::expandLocalConfig($raw);
         $driver = isset($raw['driver']) ? (string)$raw['driver'] : (string)($raw['type'] ?? 'mysql');
         if ($driver === 'mysqli') {
             $driver = 'mysql';
@@ -98,8 +133,30 @@ final class StandaloneConfigLoader
             'password' => (string)($raw['password'] ?? ''),
             'charset'  => (string)($raw['charset'] ?? 'utf8mb4'),
             'socket'   => (string)($raw['socket'] ?? ''),
+            'access_token' => (string)($raw['access_token'] ?? ''),
+            'access_token_hash' => (string)($raw['access_token_hash'] ?? ''),
+            'access_token_sha256' => (string)($raw['access_token_sha256'] ?? ''),
+            'allow_prod' => !empty($raw['allow_prod']),
             '__source' => $raw['__source'] ?? null,
         );
+    }
+
+    /**
+     * Accept both flat config.local.php and nested array('db' => array(...)).
+     *
+     * @param array<string, mixed> $raw
+     * @return array<string, mixed>
+     */
+    private static function expandLocalConfig(array $raw): array
+    {
+        if (!isset($raw['db']) || !is_array($raw['db'])) {
+            return $raw;
+        }
+
+        $meta = $raw;
+        unset($meta['db']);
+
+        return array_replace($raw['db'], $meta);
     }
 
     /**

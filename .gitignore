@@ -1,8 +1,13 @@
-﻿# Runtime logs produced by standalone tool
+# Runtime logs and local storage produced by standalone tool
 logs/
+storage/
+*.log
 
-# Local connection override
+# Local connection override with secrets
 config.local.php
+
+# Local comparison snapshots
+_remote_master/
 
 # OS / editor files
 .DS_Store

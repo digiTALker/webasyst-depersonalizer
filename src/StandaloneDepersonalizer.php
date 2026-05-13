@@ -1,4 +1,4 @@
-﻿<?php
+<?php
 declare(strict_types=1);
 
 final class StandaloneDepersonalizer
@@ -6,9 +6,7 @@ final class StandaloneDepersonalizer
     private const ORDER_PROCESSED_KEY = '_depersonalizer_ext_processed';
     private const ORDER_PROCESSED_AT_KEY = '_depersonalizer_ext_processed_at';
 
-    private const CONTACT_PROCESSED_KEY = '_depersonalizer_ext_processed';
-    private const CONTACT_PROCESSED_AT_KEY = '_depersonalizer_ext_processed_at';
-    private const CONTACT_PARAMS_APP_ID = 'shop';
+    private const STATE_TABLE = 'depersonalizer_state';
 
     /** @var PDO */
     private $pdo;
@@ -25,8 +23,11 @@ final class StandaloneDepersonalizer
     /** @var array<string, array<int, string>> */
     private $tableColumnsCache = array();
 
-    /** @var bool|null */
-    private $contactParamsHasAppId = null;
+    /** @var bool */
+    private $stateTableReady = false;
+
+    /** @var string */
+    private $runId;
 
     /** @var array<int, string> */
     private $exactPiiKeys = array(
@@ -44,6 +45,7 @@ final class StandaloneDepersonalizer
         'country',
         'street',
         'house',
+        'flat',
         'comment',
         'customer_comment',
         'ip',
@@ -54,6 +56,7 @@ final class StandaloneDepersonalizer
     private $piiWildcardPrefixes = array(
         'shipping_',
         'billing_',
+        'address_',
         'utm_',
     );
 
@@ -69,7 +72,8 @@ final class StandaloneDepersonalizer
         '/country/i',
         '/street/i',
         '/house/i',
-        '/ip/i',
+        '/flat/i',
+        '/(^|[_\-.])ip($|[_\-.])|ip_address|remote_addr/i',
         '/user_agent/i',
         '/comment/i',
     );
@@ -83,6 +87,7 @@ final class StandaloneDepersonalizer
         $this->logDir = rtrim($logDir, DIRECTORY_SEPARATOR);
         $this->logFile = $this->logDir . DIRECTORY_SEPARATOR . 'depersonalizer.log';
         $this->ensureDirectory($this->logDir);
+        $this->runId = date('YmdHis') . '-' . bin2hex(random_bytes(4));
     }
 
     /**
@@ -90,13 +95,11 @@ final class StandaloneDepersonalizer
      *
      * @return array<string, mixed>
      */
-    public function preflight(): array
+    public function preflight(bool $setupStateTable = true): array
     {
         $required = array(
             'shop_order',
             'shop_order_params',
-            'wa_contact',
-            'wa_contact_params',
         );
 
         $missing = array();
@@ -106,19 +109,44 @@ final class StandaloneDepersonalizer
             }
         }
 
+        $stateError = null;
+        if (!$missing && $setupStateTable) {
+            try {
+                $this->ensureStateTable();
+            } catch (Throwable $error) {
+                $stateError = $error->getMessage();
+                $this->stateTableReady = false;
+            }
+        } elseif (!$missing) {
+            $this->stateTableReady = $this->tableExists(self::STATE_TABLE);
+        }
+
         return array(
             'missing_required_tables' => $missing,
             'optional_tables' => array(
-                'wa_contact_emails' => $this->tableExists('wa_contact_emails'),
-                'wa_contact_data'   => $this->tableExists('wa_contact_data'),
+                'wa_contact'          => $this->tableExists('wa_contact'),
+                'wa_contact_emails'   => $this->tableExists('wa_contact_emails'),
+                'wa_contact_data'     => $this->tableExists('wa_contact_data'),
+                'wa_contact_data_text' => $this->tableExists('wa_contact_data_text'),
+                'wa_contact_addresses' => $this->tableExists('wa_contact_addresses'),
+                'wa_contact_params'   => $this->tableExists('wa_contact_params'),
+                'state_table'         => self::STATE_TABLE,
+                'state_table_ready'   => $this->stateTableReady,
+                'state_table_error'   => $stateError,
             ),
             'safe_mode_notes' => array(
-                'No schema changes are applied.',
+                'Only this tool owned depersonalizer_state table is created automatically.',
                 'Order and contact rows are updated in-place; IDs and relations are preserved.',
-                'Each record is marked by namespaced keys to avoid repeated rewrites.',
+                'Orders are marked in shop_order_params; contacts are marked in depersonalizer_state.',
+                'wa_contact_params is optional and is not required for page load or contact state.',
                 'Address rows are never deleted by this standalone tool.',
             ),
         );
+    }
+
+    public function getMysqlVersion(): string
+    {
+        return (string)$this->pdo->query('SELECT VERSION()')->fetchColumn();
     }
 
     /**
@@ -133,18 +161,45 @@ final class StandaloneDepersonalizer
         $cutoff = $this->cutoff($days);
 
         $countStmt = $this->pdo->prepare(
-            'SELECT COUNT(*) AS cnt FROM shop_order WHERE create_datetime < :cutoff'
+            'SELECT COUNT(*) AS cnt
+             FROM shop_order o
+             WHERE o.create_datetime < :cutoff
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM shop_order_params done
+                   WHERE done.order_id = o.id
+                     AND done.name = :processed_key
+                     AND done.value = :processed_value
+               )'
         );
-        $countStmt->execute(array(':cutoff' => $cutoff));
+        $countStmt->execute(array(
+            ':cutoff' => $cutoff,
+            ':processed_key' => self::ORDER_PROCESSED_KEY,
+            ':processed_value' => '1',
+        ));
         $totalOrders = (int)$countStmt->fetchColumn();
 
         $keyStmt = $this->pdo->prepare(
             'SELECT DISTINCT op.name
              FROM shop_order_params op
              INNER JOIN shop_order o ON o.id = op.order_id
-             WHERE o.create_datetime < :cutoff'
+             WHERE o.create_datetime < :cutoff
+               AND op.name NOT IN (:processed_key, :processed_at_key)
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM shop_order_params done
+                   WHERE done.order_id = o.id
+                     AND done.name = :processed_key_done
+                     AND done.value = :processed_value
+               )'
         );
-        $keyStmt->execute(array(':cutoff' => $cutoff));
+        $keyStmt->execute(array(
+            ':cutoff' => $cutoff,
+            ':processed_key' => self::ORDER_PROCESSED_KEY,
+            ':processed_at_key' => self::ORDER_PROCESSED_AT_KEY,
+            ':processed_key_done' => self::ORDER_PROCESSED_KEY,
+            ':processed_value' => '1',
+        ));
 
         $keys = array();
         while (($name = $keyStmt->fetchColumn()) !== false) {
@@ -182,6 +237,18 @@ final class StandaloneDepersonalizer
         $anonymizeContacts = !empty($options['anonymize_contacts']);
         $dryRun = !empty($options['dry_run']);
 
+        if (!$dryRun) {
+            $backupConfirmed = !empty($options['backup_confirmed']);
+            $confirmationPhrase = trim((string)($options['confirmation_phrase'] ?? ''));
+            if (!$backupConfirmed || $confirmationPhrase !== 'ANONYMIZE') {
+                throw new RuntimeException('Real anonymization requires backup confirmation and exact ANONYMIZE phrase.');
+            }
+        }
+
+        if ($anonymizeContacts && !$dryRun && !$this->stateTableReady) {
+            $this->ensureStateTable();
+        }
+
         $includeKeys = $this->normalizeIncludeKeys($options['include_keys'] ?? array());
         $includeMap = array_fill_keys($includeKeys, true);
 
@@ -202,6 +269,7 @@ final class StandaloneDepersonalizer
                 'processed_contacts' => array(),
                 'skipped_contacts' => array(),
                 'dry_run' => $dryRun,
+                'run_id' => $this->runId,
                 'batch_log' => null,
             );
         }
@@ -242,6 +310,10 @@ final class StandaloneDepersonalizer
                     }
 
                     if (!$this->isPiiKey($key)) {
+                        continue;
+                    }
+
+                    if ($this->isCommentKey($key) && !$wipeComments && !isset($includeMap[$key])) {
                         continue;
                     }
 
@@ -297,10 +369,11 @@ final class StandaloneDepersonalizer
 
         $nextCursor = (int)$orders[count($orders) - 1]['id'];
         $done = !$this->hasOrdersAfterCursor($cutoff, $nextCursor);
-        $progress = $this->countOrdersUpToCursor($cutoff, $nextCursor);
+        $progress = max(0, $total - $this->countOrdersAfterCursor($cutoff, $nextCursor));
 
         $batchPayload = array(
-            'executed_at' => date('c'),
+            'run_id' => $this->runId,
+            'timestamp' => date('c'),
             'dry_run' => $dryRun,
             'options' => array(
                 'days' => $days,
@@ -312,12 +385,11 @@ final class StandaloneDepersonalizer
                 'include_keys' => $includeKeys,
             ),
             'cutoff' => $cutoff,
-            'result' => array(
-                'processed_orders' => $processedOrders,
-                'skipped_orders' => $skippedOrders,
-                'processed_contacts' => $processedContacts,
-                'skipped_contacts' => $skippedContacts,
-            ),
+            'processed_orders' => $processedOrders,
+            'skipped_orders' => $skippedOrders,
+            'processed_contacts' => $processedContacts,
+            'skipped_contacts' => $skippedContacts,
+            'selected_include_keys' => $includeKeys,
         );
 
         $batchLog = $this->writeBatchLog($batchPayload);
@@ -328,6 +400,9 @@ final class StandaloneDepersonalizer
             'dry_run' => $dryRun,
             'processed_orders' => count($processedOrders),
             'processed_contacts' => count($processedContacts),
+            'skipped_orders' => count($skippedOrders),
+            'skipped_contacts' => count($skippedContacts),
+            'run_id' => $this->runId,
             'batch_log' => $batchLog,
         ));
 
@@ -343,6 +418,7 @@ final class StandaloneDepersonalizer
             'processed_contacts' => $processedContacts,
             'skipped_contacts' => $skippedContacts,
             'dry_run' => $dryRun,
+            'run_id' => $this->runId,
             'batch_log' => $batchLog,
         );
     }
@@ -356,15 +432,24 @@ final class StandaloneDepersonalizer
     private function fetchOrdersBatch(string $cutoff, int $cursor, int $limit): array
     {
         $sql = 'SELECT id, contact_id
-                FROM shop_order
-                WHERE create_datetime < :cutoff
-                  AND id > :cursor
+                FROM shop_order o
+                WHERE o.create_datetime < :cutoff
+                  AND o.id > :cursor
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM shop_order_params done
+                      WHERE done.order_id = o.id
+                        AND done.name = :processed_key
+                        AND done.value = :processed_value
+                  )
                 ORDER BY id ASC
                 LIMIT :limit';
 
         $stmt = $this->pdo->prepare($sql);
         $stmt->bindValue(':cutoff', $cutoff, PDO::PARAM_STR);
         $stmt->bindValue(':cursor', $cursor, PDO::PARAM_INT);
+        $stmt->bindValue(':processed_key', self::ORDER_PROCESSED_KEY, PDO::PARAM_STR);
+        $stmt->bindValue(':processed_value', '1', PDO::PARAM_STR);
         $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
         $stmt->execute();
 
@@ -452,12 +537,16 @@ final class StandaloneDepersonalizer
 
     private function isPiiKey(string $key): bool
     {
+        if ($this->isTechnicalParamKey($key)) {
+            return false;
+        }
+
         if (in_array($key, $this->exactPiiKeys, true)) {
             return true;
         }
 
         foreach ($this->piiWildcardPrefixes as $prefix) {
-            if (strpos($key, $prefix) === 0) {
+            if (strpos($key, $prefix) === 0 && $this->keyHasPersonalFragment($key)) {
                 return true;
             }
         }
@@ -471,24 +560,42 @@ final class StandaloneDepersonalizer
         return false;
     }
 
+    private function isTechnicalParamKey(string $key): bool
+    {
+        return preg_match('/(^|_)(id|code|plugin|module|rate|method|currency|tax|total|price|amount|sku|quantity|status|state|workflow)$/i', $key) === 1;
+    }
+
+    private function keyHasPersonalFragment(string $key): bool
+    {
+        return preg_match(
+            '/name|company|email|phone|address|zip|city|region|country|street|house|flat|comment|user_agent|(^|[_\-.])ip($|[_\-.])|ip_address|remote_addr/i',
+            $key
+        ) === 1;
+    }
+
+    private function isCommentKey(string $key): bool
+    {
+        return preg_match('/comment/i', $key) === 1;
+    }
+
     private function maskOrderParam(string $key, string $value, int $orderId): string
     {
         if (preg_match('/email/i', $key) === 1) {
-            return 'anon+' . $orderId . '@example.invalid';
+            return 'anon+order_' . $orderId . '@example.invalid';
         }
         if (preg_match('/phone/i', $key) === 1) {
-            return 'anon-' . sha1((string)$orderId);
+            return 'anon-order-' . sha1((string)$orderId);
         }
         if (preg_match('/(firstname|middlename|lastname|name|company)/i', $key) === 1) {
             return 'Deleted';
         }
-        if (preg_match('/ip/i', $key) === 1) {
-            return '0.0.0.0';
-        }
         if (preg_match('/user_agent/i', $key) === 1) {
             return 'unknown';
         }
-        if (preg_match('/(country|region|city|address|street|house|zip)/i', $key) === 1) {
+        if (preg_match('/(^|[_\-.])ip($|[_\-.])|ip_address|remote_addr/i', $key) === 1) {
+            return '0.0.0.0';
+        }
+        if (preg_match('/(country|region|city|address|street|house|flat|zip)/i', $key) === 1) {
             return '';
         }
 
@@ -534,45 +641,13 @@ final class StandaloneDepersonalizer
                 continue;
             }
 
-            $contactStmt = $this->pdo->prepare(
-                'UPDATE wa_contact
-                 SET firstname = :firstname, middlename = :middlename, lastname = :lastname
-                 WHERE id = :contact_id'
-            );
-            $contactStmt->execute(array(
-                ':firstname' => 'Deleted',
-                ':middlename' => '',
-                ':lastname' => 'Deleted',
-                ':contact_id' => $contactId,
-            ));
+            $this->updateContactCore($contactId);
+            $this->updateContactEmails($contactId);
+            $this->updateContactData($contactId);
+            $this->updateContactDataText($contactId);
+            $this->updateContactAddresses($contactId);
 
-            if ($this->tableExists('wa_contact_emails')) {
-                $emailStmt = $this->pdo->prepare(
-                    'UPDATE wa_contact_emails
-                     SET email = :email
-                     WHERE contact_id = :contact_id'
-                );
-                $emailStmt->execute(array(
-                    ':email' => 'anon+' . $contactId . '@example.invalid',
-                    ':contact_id' => $contactId,
-                ));
-            }
-
-            if ($this->tableExists('wa_contact_data')) {
-                $phoneStmt = $this->pdo->prepare(
-                    "UPDATE wa_contact_data
-                     SET value = :value
-                     WHERE contact_id = :contact_id
-                       AND (field = 'phone' OR field LIKE 'phone.%')"
-                );
-                $phoneStmt->execute(array(
-                    ':value' => 'anon-' . sha1((string)$contactId),
-                    ':contact_id' => $contactId,
-                ));
-            }
-
-            $this->setContactParam($contactId, self::CONTACT_PROCESSED_KEY, '1');
-            $this->setContactParam($contactId, self::CONTACT_PROCESSED_AT_KEY, date('Y-m-d H:i:s'));
+            $this->markContactProcessed($contactId, 'processed');
 
             $processed[] = $contactId;
         }
@@ -580,12 +655,199 @@ final class StandaloneDepersonalizer
         return array('processed' => $processed, 'skipped' => $skipped);
     }
 
+    private function updateContactCore(int $contactId): void
+    {
+        $values = array(
+            'name' => 'Deleted',
+            'firstname' => 'Deleted',
+            'middlename' => '',
+            'lastname' => '',
+            'title' => '',
+            'company' => '',
+            'company_contact_id' => 0,
+            'jobtitle' => '',
+            'about' => '',
+            'sex' => null,
+            'birth_day' => null,
+            'birth_month' => null,
+            'birth_year' => null,
+            'photo' => 0,
+        );
+
+        $sets = array();
+        $params = array(':contact_id' => $contactId);
+        foreach ($values as $column => $value) {
+            if (!$this->tableHasColumn('wa_contact', $column)) {
+                continue;
+            }
+            $placeholder = ':' . $column;
+            $sets[] = $this->quoteIdentifier($column) . ' = ' . $placeholder;
+            $params[$placeholder] = $value;
+        }
+
+        if (!$sets) {
+            return;
+        }
+
+        $stmt = $this->pdo->prepare(
+            'UPDATE wa_contact
+             SET ' . implode(', ', $sets) . '
+             WHERE id = :contact_id'
+        );
+        $stmt->execute($params);
+    }
+
+    private function updateContactEmails(int $contactId): void
+    {
+        if (!$this->tableExists('wa_contact_emails')) {
+            return;
+        }
+
+        $sets = array("email = CONCAT('anon+contact_', contact_id, '_', id, '@example.invalid')");
+        if ($this->tableHasColumn('wa_contact_emails', 'status')) {
+            $sets[] = "status = 'unavailable'";
+        }
+
+        $stmt = $this->pdo->prepare(
+            'UPDATE wa_contact_emails
+             SET ' . implode(', ', $sets) . '
+             WHERE contact_id = :contact_id'
+        );
+        $stmt->execute(array(':contact_id' => $contactId));
+    }
+
+    private function updateContactData(int $contactId): void
+    {
+        if (!$this->tableExists('wa_contact_data')) {
+            return;
+        }
+
+        $stmt = $this->pdo->prepare(
+            "UPDATE wa_contact_data
+             SET value = CASE
+                 WHEN field = 'phone' OR field LIKE 'phone.%' OR field LIKE '%phone%' THEN :phone
+                 WHEN field = 'email' OR field LIKE 'email.%' OR field LIKE '%email%' THEN :email
+                 WHEN field LIKE '%name%' OR field LIKE '%company%' THEN 'Deleted'
+                 ELSE ''
+             END
+             WHERE contact_id = :contact_id
+               AND (
+                   field = 'phone'
+                   OR field LIKE 'phone.%'
+                   OR field LIKE '%phone%'
+                   OR field = 'email'
+                   OR field LIKE 'email.%'
+                   OR field LIKE '%email%'
+                   OR field LIKE '%name%'
+                   OR field LIKE '%company%'
+                   OR field LIKE '%address%'
+                   OR field LIKE '%street%'
+                   OR field LIKE '%house%'
+                   OR field LIKE '%flat%'
+                   OR field LIKE '%zip%'
+                   OR field LIKE '%city%'
+                   OR field LIKE '%region%'
+                   OR field LIKE '%country%'
+                   OR field LIKE '%comment%'
+               )"
+        );
+        $stmt->execute(array(
+            ':phone' => 'anon-contact-' . sha1((string)$contactId),
+            ':email' => 'anon+contact_' . $contactId . '@example.invalid',
+            ':contact_id' => $contactId,
+        ));
+    }
+
+    private function updateContactDataText(int $contactId): void
+    {
+        if (!$this->tableExists('wa_contact_data_text')) {
+            return;
+        }
+
+        $sql = 'UPDATE wa_contact_data_text
+                SET value = :value
+                WHERE contact_id = :contact_id';
+        if ($this->tableHasColumn('wa_contact_data_text', 'field')) {
+            $sql .= " AND (
+                field LIKE '%name%'
+                OR field LIKE '%company%'
+                OR field LIKE '%address%'
+                OR field LIKE '%street%'
+                OR field LIKE '%house%'
+                OR field LIKE '%flat%'
+                OR field LIKE '%zip%'
+                OR field LIKE '%city%'
+                OR field LIKE '%region%'
+                OR field LIKE '%country%'
+                OR field LIKE '%comment%'
+            )";
+        }
+
+        $stmt = $this->pdo->prepare($sql);
+        $stmt->execute(array(
+            ':value' => '',
+            ':contact_id' => $contactId,
+        ));
+    }
+
+    private function updateContactAddresses(int $contactId): void
+    {
+        if (!$this->tableExists('wa_contact_addresses')) {
+            return;
+        }
+
+        $values = array(
+            'name' => '',
+            'firstname' => '',
+            'middlename' => '',
+            'lastname' => '',
+            'company' => '',
+            'street' => '',
+            'house' => '',
+            'flat' => '',
+            'zip' => '',
+            'city' => '',
+            'region' => '',
+            'country' => '',
+            'address' => '',
+            'phone' => 'anon-contact-' . sha1((string)$contactId),
+            'comment' => '',
+            'value' => '',
+            'data' => '',
+        );
+
+        $sets = array();
+        $params = array(':contact_id' => $contactId);
+        foreach ($values as $column => $value) {
+            if (!$this->tableHasColumn('wa_contact_addresses', $column)) {
+                continue;
+            }
+            $placeholder = ':' . $column;
+            $sets[] = $this->quoteIdentifier($column) . ' = ' . $placeholder;
+            $params[$placeholder] = $value;
+        }
+
+        if (!$sets) {
+            return;
+        }
+
+        $stmt = $this->pdo->prepare(
+            'UPDATE wa_contact_addresses
+             SET ' . implode(', ', $sets) . '
+             WHERE contact_id = :contact_id'
+        );
+        $stmt->execute($params);
+    }
+
     private function getContactSkipReason(int $contactId, string $cutoff): ?string
     {
-        $existsStmt = $this->pdo->prepare('SELECT 1 FROM wa_contact WHERE id = :contact_id LIMIT 1');
-        $existsStmt->execute(array(':contact_id' => $contactId));
-        if (!$existsStmt->fetchColumn()) {
-            return 'contact_missing';
+        if (!$this->tableExists('wa_contact')) {
+            return 'wa_contact_missing';
+        }
+
+        $protectionReason = $this->getContactAccountProtectionReason($contactId);
+        if ($protectionReason !== null) {
+            return $protectionReason;
         }
 
         $hasNewerStmt = $this->pdo->prepare(
@@ -603,6 +865,17 @@ final class StandaloneDepersonalizer
             return 'has_newer_orders';
         }
 
+        if (!$this->stateTableReady) {
+            try {
+                $this->ensureStateTable();
+            } catch (Throwable $error) {
+                $this->log('error', 'Contact state table is unavailable', array(
+                    'exception' => $error->getMessage(),
+                ));
+                return 'state_table_missing';
+            }
+        }
+
         if ($this->isContactAlreadyProcessed($contactId)) {
             return 'already_processed';
         }
@@ -610,77 +883,114 @@ final class StandaloneDepersonalizer
         return null;
     }
 
-    private function isContactAlreadyProcessed(int $contactId): bool
+    private function getContactAccountProtectionReason(int $contactId): ?string
     {
-        if ($this->contactParamsHasAppId === null) {
-            $this->contactParamsHasAppId = $this->tableHasColumn('wa_contact_params', 'app_id');
+        $columns = array('id');
+        foreach (array('is_staff', 'is_user', 'login') as $column) {
+            if ($this->tableHasColumn('wa_contact', $column)) {
+                $columns[] = $column;
+            }
         }
 
-        if ($this->contactParamsHasAppId) {
-            $stmt = $this->pdo->prepare(
-                "SELECT 1
-                 FROM wa_contact_params
-                 WHERE contact_id = :contact_id
-                   AND app_id = :app_id
-                   AND name = :name
-                   AND value = '1'
-                 LIMIT 1"
-            );
-            $stmt->execute(array(
-                ':contact_id' => $contactId,
-                ':app_id' => self::CONTACT_PARAMS_APP_ID,
-                ':name' => self::CONTACT_PROCESSED_KEY,
-            ));
-            return (bool)$stmt->fetchColumn();
+        $select = array();
+        foreach ($columns as $column) {
+            $select[] = $this->quoteIdentifier($column);
         }
 
         $stmt = $this->pdo->prepare(
-            "SELECT 1
-             FROM wa_contact_params
-             WHERE contact_id = :contact_id
-               AND name = :name
-               AND value = '1'
-             LIMIT 1"
+            'SELECT ' . implode(', ', $select) . '
+             FROM wa_contact
+             WHERE id = :contact_id
+             LIMIT 1'
+        );
+        $stmt->execute(array(':contact_id' => $contactId));
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        if (!$row) {
+            return 'contact_missing';
+        }
+
+        if (isset($row['is_staff']) && (int)$row['is_staff'] > 0) {
+            return 'staff_contact';
+        }
+        if (isset($row['is_user']) && (int)$row['is_user'] > 0) {
+            return 'user_contact';
+        }
+        if (isset($row['login']) && trim((string)$row['login']) !== '') {
+            return 'has_login';
+        }
+
+        return null;
+    }
+
+    private function isContactAlreadyProcessed(int $contactId): bool
+    {
+        if (!$this->stateTableReady) {
+            return false;
+        }
+
+        $stmt = $this->pdo->prepare(
+            'SELECT 1
+             FROM depersonalizer_state
+             WHERE entity_type = :entity_type
+               AND entity_id = :entity_id
+             LIMIT 1'
         );
         $stmt->execute(array(
-            ':contact_id' => $contactId,
-            ':name' => self::CONTACT_PROCESSED_KEY,
+            ':entity_type' => 'contact',
+            ':entity_id' => $contactId,
         ));
 
         return (bool)$stmt->fetchColumn();
     }
 
-    private function setContactParam(int $contactId, string $name, string $value): void
+    private function markContactProcessed(int $contactId, string $note): void
     {
-        if ($this->contactParamsHasAppId === null) {
-            $this->contactParamsHasAppId = $this->tableHasColumn('wa_contact_params', 'app_id');
-        }
-
-        if ($this->contactParamsHasAppId) {
-            $stmt = $this->pdo->prepare(
-                'INSERT INTO wa_contact_params (contact_id, app_id, name, value)
-                 VALUES (:contact_id, :app_id, :name, :value)
-                 ON DUPLICATE KEY UPDATE value = VALUES(value)'
-            );
-            $stmt->execute(array(
-                ':contact_id' => $contactId,
-                ':app_id' => self::CONTACT_PARAMS_APP_ID,
-                ':name' => $name,
-                ':value' => $value,
-            ));
-            return;
+        if (!$this->stateTableReady) {
+            $this->ensureStateTable();
         }
 
         $stmt = $this->pdo->prepare(
-            'INSERT INTO wa_contact_params (contact_id, name, value)
-             VALUES (:contact_id, :name, :value)
-             ON DUPLICATE KEY UPDATE value = VALUES(value)'
+            'INSERT INTO depersonalizer_state
+                (entity_type, entity_id, processed_at, run_id, note, payload)
+             VALUES
+                (:entity_type, :entity_id, NOW(), :run_id, :note, :payload)
+             ON DUPLICATE KEY UPDATE
+                processed_at = VALUES(processed_at),
+                run_id = VALUES(run_id),
+                note = VALUES(note),
+                payload = VALUES(payload)'
         );
         $stmt->execute(array(
-            ':contact_id' => $contactId,
-            ':name' => $name,
-            ':value' => $value,
+            ':entity_type' => 'contact',
+            ':entity_id' => $contactId,
+            ':run_id' => $this->runId,
+            ':note' => $note,
+            ':payload' => json_encode(array('source' => 'standalone'), JSON_UNESCAPED_SLASHES),
         ));
+    }
+
+    private function ensureStateTable(): void
+    {
+        if ($this->stateTableReady && $this->tableExists(self::STATE_TABLE)) {
+            return;
+        }
+
+        $this->pdo->exec(
+            'CREATE TABLE IF NOT EXISTS depersonalizer_state (
+                entity_type VARCHAR(32) NOT NULL,
+                entity_id INT UNSIGNED NOT NULL,
+                processed_at DATETIME NOT NULL,
+                run_id VARCHAR(64) NOT NULL,
+                note VARCHAR(255) DEFAULT NULL,
+                payload TEXT DEFAULT NULL,
+                PRIMARY KEY (entity_type, entity_id),
+                KEY run_id (run_id),
+                KEY processed_at (processed_at)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4'
+        );
+
+        $this->tableExistsCache[self::STATE_TABLE] = true;
+        $this->stateTableReady = true;
     }
 
     private function cutoff(int $days): string
@@ -690,8 +1000,23 @@ final class StandaloneDepersonalizer
 
     private function countOrdersOlderThan(string $cutoff): int
     {
-        $stmt = $this->pdo->prepare('SELECT COUNT(*) FROM shop_order WHERE create_datetime < :cutoff');
-        $stmt->execute(array(':cutoff' => $cutoff));
+        $stmt = $this->pdo->prepare(
+            'SELECT COUNT(*)
+             FROM shop_order o
+             WHERE o.create_datetime < :cutoff
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM shop_order_params done
+                   WHERE done.order_id = o.id
+                     AND done.name = :processed_key
+                     AND done.value = :processed_value
+               )'
+        );
+        $stmt->execute(array(
+            ':cutoff' => $cutoff,
+            ':processed_key' => self::ORDER_PROCESSED_KEY,
+            ':processed_value' => '1',
+        ));
         return (int)$stmt->fetchColumn();
     }
 
@@ -702,12 +1027,21 @@ final class StandaloneDepersonalizer
         }
         $stmt = $this->pdo->prepare(
             'SELECT COUNT(*)
-             FROM shop_order
-             WHERE create_datetime < :cutoff
-               AND id <= :cursor'
+             FROM shop_order o
+             WHERE o.create_datetime < :cutoff
+               AND o.id <= :cursor
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM shop_order_params done
+                   WHERE done.order_id = o.id
+                     AND done.name = :processed_key
+                     AND done.value = :processed_value
+               )'
         );
         $stmt->bindValue(':cutoff', $cutoff, PDO::PARAM_STR);
         $stmt->bindValue(':cursor', $cursor, PDO::PARAM_INT);
+        $stmt->bindValue(':processed_key', self::ORDER_PROCESSED_KEY, PDO::PARAM_STR);
+        $stmt->bindValue(':processed_value', '1', PDO::PARAM_STR);
         $stmt->execute();
 
         return (int)$stmt->fetchColumn();
@@ -717,16 +1051,49 @@ final class StandaloneDepersonalizer
     {
         $stmt = $this->pdo->prepare(
             'SELECT 1
-             FROM shop_order
-             WHERE create_datetime < :cutoff
-               AND id > :cursor
+             FROM shop_order o
+             WHERE o.create_datetime < :cutoff
+               AND o.id > :cursor
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM shop_order_params done
+                   WHERE done.order_id = o.id
+                     AND done.name = :processed_key
+                     AND done.value = :processed_value
+               )
              LIMIT 1'
         );
         $stmt->bindValue(':cutoff', $cutoff, PDO::PARAM_STR);
         $stmt->bindValue(':cursor', $cursor, PDO::PARAM_INT);
+        $stmt->bindValue(':processed_key', self::ORDER_PROCESSED_KEY, PDO::PARAM_STR);
+        $stmt->bindValue(':processed_value', '1', PDO::PARAM_STR);
         $stmt->execute();
 
         return (bool)$stmt->fetchColumn();
+    }
+
+    private function countOrdersAfterCursor(string $cutoff, int $cursor): int
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT COUNT(*)
+             FROM shop_order o
+             WHERE o.create_datetime < :cutoff
+               AND o.id > :cursor
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM shop_order_params done
+                   WHERE done.order_id = o.id
+                     AND done.name = :processed_key
+                     AND done.value = :processed_value
+               )'
+        );
+        $stmt->bindValue(':cutoff', $cutoff, PDO::PARAM_STR);
+        $stmt->bindValue(':cursor', $cursor, PDO::PARAM_INT);
+        $stmt->bindValue(':processed_key', self::ORDER_PROCESSED_KEY, PDO::PARAM_STR);
+        $stmt->bindValue(':processed_value', '1', PDO::PARAM_STR);
+        $stmt->execute();
+
+        return (int)$stmt->fetchColumn();
     }
 
     private function normalizeDays(int $days): int
@@ -827,7 +1194,10 @@ final class StandaloneDepersonalizer
      */
     private function writeBatchLog(array $payload): string
     {
-        $dateDir = $this->logDir . DIRECTORY_SEPARATOR . 'batches' . DIRECTORY_SEPARATOR . date('Y-m-d');
+        $batchesDir = $this->logDir . DIRECTORY_SEPARATOR . 'batches';
+        $this->ensureDirectory($batchesDir);
+
+        $dateDir = $batchesDir . DIRECTORY_SEPARATOR . date('Y-m-d');
         $this->ensureDirectory($dateDir);
 
         $fileName = 'batch-' . date('H-i-s') . '-' . mt_rand(1000, 9999) . '.json';
@@ -865,9 +1235,37 @@ final class StandaloneDepersonalizer
     private function ensureDirectory(string $path): void
     {
         if (!is_dir($path)) {
-            mkdir($path, 0755, true);
+            if (!mkdir($path, 0755, true) && !is_dir($path)) {
+                throw new RuntimeException('Unable to create directory: ' . $path);
+            }
+        }
+
+        $htaccess = $path . DIRECTORY_SEPARATOR . '.htaccess';
+        if (!is_file($htaccess)) {
+            file_put_contents($htaccess, "Require all denied\nDeny from all\n");
+        }
+
+        $webConfig = $path . DIRECTORY_SEPARATOR . 'web.config';
+        if (!is_file($webConfig)) {
+            file_put_contents(
+                $webConfig,
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" .
+                "<configuration>\n" .
+                "  <system.webServer>\n" .
+                "    <security>\n" .
+                "      <authorization>\n" .
+                "        <remove users=\"*\" roles=\"\" verbs=\"\" />\n" .
+                "        <add accessType=\"Deny\" users=\"*\" />\n" .
+                "      </authorization>\n" .
+                "    </security>\n" .
+                "  </system.webServer>\n" .
+                "</configuration>\n"
+            );
+        }
+
+        $index = $path . DIRECTORY_SEPARATOR . 'index.html';
+        if (!is_file($index)) {
+            file_put_contents($index, '');
         }
     }
 }
-
-

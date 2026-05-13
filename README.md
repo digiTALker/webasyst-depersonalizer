@@ -1,49 +1,110 @@
-﻿# Webasyst Depersonalizer (Standalone)
+# Webasyst Depersonalizer (Standalone)
 
-This repository now provides a **standalone PHP page** for depersonalizing old Webasyst Shop-Script data.
+This repository contains a standalone PHP web page for anonymizing old Webasyst/Shop-Script personal data directly in MySQL.
 
-No plugin installation is required. Upload this folder to your server, open `index.php`, and run the process from the page.
+It is not a Webasyst plugin. Do not install it through Webasyst Installer, hooks, plugin registration, or backend routing. Old plugin code is kept only in `legacy-plugin/` for reference.
 
-## Why this version
+## Target Deployment
 
-The old plugin-oriented implementation had architecture and encoding inconsistencies (mixed UI/CLI states, duplicated logic, broken RU text encoding in files). The project is now unified around one standalone service.
+Example deployment path:
 
-## Files
+```text
+/home/d/dtalke/shop.incyber.ru/public_html/test/tools/depersonalizer/
+```
 
-- `index.php` - web page and API endpoints (`preview` + batch `run`)
-- `src/StandaloneConfigLoader.php` - DB config loader (auto from `wa-config/db.php` or local override)
-- `src/StandaloneDepersonalizer.php` - depersonalization engine
-- `config.local.php.example` - local DB config template
-- `logs/` - runtime and batch logs (created automatically)
+Example URL:
 
-## Deployment
+```text
+https://shop.incyber.ru/test/tools/depersonalizer/index.php
+```
 
-1. Upload the folder to your server (for example: `/var/www/site/tools/depersonalizer/`).
-2. Open `index.php` in browser.
-3. If auto-detection fails, create `config.local.php` from `config.local.php.example`.
-4. Run **Preview** first, then execute batches.
+The tool should be pointed at the test database first:
 
-## Safety model (conflict-averse with Webasyst core)
+```text
+dtalke_test_shop
+```
 
-This tool is intentionally conservative:
+## Local Config
 
-- No schema migrations or table structure changes.
-- No deletions from core order/contact tables.
-- Updates run in DB transactions batch-by-batch.
-- Processed rows are marked via namespaced keys:
-  - `shop_order_params._depersonalizer_ext_processed`
-  - `wa_contact_params._depersonalizer_ext_processed`
-- Existing IDs and table relations are preserved.
+Create `config.local.php` from `config.local.php.example`. Do not commit it.
 
-## Notes
+```php
+<?php
+return array(
+    'driver'   => 'mysql',
+    'host'     => 'localhost',
+    'port'     => 3306,
+    'database' => 'dtalke_test_shop',
+    'user'     => 'dtalke_test_shop',
+    'password' => 'REPLACE_WITH_REAL_PASSWORD',
+    'charset'  => 'utf8mb4',
+    'socket'   => '',
 
-- Always take a DB backup before first real run.
-- Keep `dry-run` enabled until preview results look correct.
-- Contact anonymization is optional and only affects contacts without newer orders.
-- Restrict access to this page (IP allowlist or basic auth) before production use.
+    'access_token' => 'REPLACE_WITH_LONG_RANDOM_ACCESS_TOKEN',
+    'allow_prod' => false,
+);
+```
 
-## Legacy plugin files
+The loader also tolerates nested `db` arrays and Webasyst `wa-config/db.php`, but the normalized internal config is flat.
 
-Old plugin files are moved to `legacy-plugin/` for reference, but the current supported workflow is the standalone page.
+## Beget / PHP
 
+The web server for this folder may run PHP 8.1 while the default shell `php` can be PHP 5.6. Use the explicit PHP 8.1 binary for syntax checks:
 
+```bash
+cd ~/shop.incyber.ru/public_html/test/tools/depersonalizer
+/usr/local/php-cgi/8.1/bin/php -l index.php
+/usr/local/php-cgi/8.1/bin/php -l src/StandaloneConfigLoader.php
+/usr/local/php-cgi/8.1/bin/php -l src/StandaloneDepersonalizer.php
+```
+
+All SQL is kept MySQL 5.7-compatible. Do not add CTEs, window functions, `JSON_TABLE`, `REGEXP_REPLACE`, or MySQL 8-only collations.
+
+## Safety
+
+- Protect the folder with BasicAuth or an IP allowlist before opening it publicly.
+- A sample BasicAuth file is provided as `.htaccess.example`; it assumes `/home/d/dtalke/.htpasswd` exists.
+- Delete `phpver.php` from the deployment folder.
+- Do not leave debug output enabled.
+- Do not commit `config.local.php`, logs, storage files, or real credentials.
+- Rotate credentials if they were pasted into chats, screenshots, or logs.
+- Make a fresh database backup before any non-dry-run execution.
+- Real runs require the backup checkbox and exact `ANONYMIZE` confirmation phrase.
+- Production-like targets are blocked unless local config explicitly contains `'allow_prod' => true`.
+
+## Workflow
+
+1. Open the page and unlock it with the access token.
+2. Confirm the environment badge is `TEST`.
+3. Confirm DB is `dtalke_test_shop`.
+4. Run `Preview` with the default 365-day retention.
+5. Review detected `shop_order_params` candidate keys and uncheck anything technical.
+6. Keep `Dry-run` enabled and press `Run`.
+7. Review progress and logs.
+8. Only after validating logs, disable `Dry-run`, check the backup box, type `ANONYMIZE`, and run the real batch.
+
+## What It Changes
+
+- Orders are selected from `shop_order` by `create_datetime < cutoff`.
+- Already processed orders are skipped using `shop_order_params` markers:
+  - `_depersonalizer_ext_processed = 1`
+  - `_depersonalizer_ext_processed_at = timestamp`
+- Candidate personal data is updated only in selected `shop_order_params` keys.
+- Optional contact anonymization is limited to contacts with no newer orders.
+- Contact state is tracked in standalone table `depersonalizer_state`; `wa_contact_params` is optional and not required.
+- The tool does not delete order/contact rows and does not modify products, items, totals, statuses, payments, shipping rates, or reports.
+
+## Logs
+
+Runtime logs are created automatically:
+
+```text
+logs/depersonalizer.log
+logs/batches/YYYY-MM-DD/batch-HH-MM-SS-random.json
+```
+
+Batch logs include run id, timestamp, dry-run flag, options, cutoff, processed/skipped order and contact IDs, and selected include keys. Original personal data values are not logged.
+
+## Legacy Plugin
+
+`legacy-plugin/` is reference-only. The supported product is the standalone page in this repository root.

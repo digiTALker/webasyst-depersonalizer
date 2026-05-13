@@ -1,12 +1,17 @@
-﻿<?php
+<?php
 return array(
-    // Optional static credentials. If this file is absent, index.php tries wa-config/db.php automatically.
     'driver'   => 'mysql',
-    'host'     => '127.0.0.1',
+    'host'     => 'localhost',
     'port'     => 3306,
-    'database' => 'webasyst',
-    'user'     => 'db_user',
-    'password' => 'db_password',
+    'database' => 'dtalke_test_shop',
+    'user'     => 'dtalke_test_shop',
+    'password' => 'REPLACE_WITH_REAL_PASSWORD',
     'charset'  => 'utf8mb4',
-    // 'socket' => '/var/run/mysqld/mysqld.sock',
+    'socket'   => '',
+
+    // Required page access token. Use a long random value and keep this file outside git.
+    'access_token' => 'REPLACE_WITH_LONG_RANDOM_ACCESS_TOKEN',
+
+    // Keep false for test. Set true only when you intentionally allow real runs on production-like DBs.
+    'allow_prod' => false,
 );
