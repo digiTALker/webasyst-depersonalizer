@@ -65,7 +65,7 @@ final class StandaloneConfigLoader
     {
         $driver = (string)$config['driver'];
         if ($driver !== 'mysql') {
-            throw new RuntimeException('Only MySQL is supported by this script.');
+            throw new RuntimeException('Этот инструмент поддерживает только MySQL.');
         }
 
         $database = (string)$config['database'];
@@ -106,7 +106,7 @@ final class StandaloneConfigLoader
         $hasSocket = isset($config['socket']) && trim((string)$config['socket']) !== '';
         $hasHost = isset($config['host']) && trim((string)$config['host']) !== '';
         if (!$hasSocket && !$hasHost) {
-            $missing[] = 'host or socket';
+            $missing[] = 'host или socket';
         }
 
         return $missing;

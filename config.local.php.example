@@ -9,9 +9,9 @@ return array(
     'charset'  => 'utf8mb4',
     'socket'   => '',
 
-    // Required page access token. Use a long random value and keep this file outside git.
+    // Обязательный токен доступа к странице. Используйте длинное случайное значение и не добавляйте этот файл в git.
     'access_token' => 'REPLACE_WITH_LONG_RANDOM_ACCESS_TOKEN',
 
-    // Keep false for test. Set true only when you intentionally allow real runs on production-like DBs.
+    // Для теста оставьте false. Включайте true только если намеренно разрешаете реальные запуски на PROD-похожей БД.
     'allow_prod' => false,
 );

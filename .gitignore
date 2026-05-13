@@ -1,15 +1,17 @@
-# Runtime logs and local storage produced by standalone tool
+# Runtime-логи и локальное хранилище standalone-инструмента
 logs/
 storage/
 *.log
+phpver.php
 
-# Local connection override with secrets
+# Локальная конфигурация с секретами
 config.local.php
+.htpasswd
 
-# Local comparison snapshots
+# Локальные снимки для сравнения
 _remote_master/
 
-# OS / editor files
+# Файлы ОС и редакторов
 .DS_Store
 Thumbs.db
 *~

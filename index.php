@@ -1,6 +1,25 @@
 <?php
 declare(strict_types=1);
 
+function depersonalizerSessionCookiePath(): string
+{
+    $scriptName = (string)($_SERVER['SCRIPT_NAME'] ?? '');
+    $dir = str_replace('\\', '/', dirname($scriptName));
+    if ($dir === '/' || $dir === '\\' || $dir === '.') {
+        return '/';
+    }
+
+    return rtrim($dir, '/') . '/';
+}
+
+session_name('depersonalizer_sid');
+session_set_cookie_params(array(
+    'lifetime' => 0,
+    'path' => depersonalizerSessionCookiePath(),
+    'secure' => (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off'),
+    'httponly' => true,
+    'samesite' => 'Lax',
+));
 session_start();
 
 require_once __DIR__ . '/src/StandaloneConfigLoader.php';
@@ -168,11 +187,11 @@ function renderAccessPage(bool $isConfigured, ?string $error = null): void
     $safeError = $error !== null ? htmlspecialchars($error, ENT_QUOTES, 'UTF-8') : '';
     ?>
 <!doctype html>
-<html lang="en">
+<html lang="ru">
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Webasyst Depersonalizer Access</title>
+    <title>Доступ к обезличиванию Webasyst</title>
     <style>
         body {
             margin: 0;
@@ -231,17 +250,18 @@ function renderAccessPage(bool $isConfigured, ?string $error = null): void
 </head>
 <body>
 <div class="box">
-    <h1>Access required</h1>
+    <h1>Требуется доступ</h1>
     <?php if (!$isConfigured): ?>
-        <p>This tool is locked until an access token is configured.</p>
-        <p>Set <code>DEPERSONALIZER_ACCESS_TOKEN</code> in the server environment or add <code>access_token</code> to <code>config.local.php</code>.</p>
+        <p>Инструмент закрыт до настройки токена доступа.</p>
+        <p>Задайте <code>DEPERSONALIZER_ACCESS_TOKEN</code> в окружении сервера или добавьте <code>access_token</code> в <code>config.local.php</code>.</p>
     <?php else: ?>
         <form method="post">
             <input type="hidden" name="action" value="login">
-            <label for="access_token">Access token</label>
+            <label for="access_token">Токен доступа</label>
             <input id="access_token" name="access_token" type="password" autocomplete="current-password" autofocus>
-            <button type="submit">Unlock</button>
+            <button type="submit">Открыть</button>
         </form>
+        <p>Если вход не срабатывает, очистите cookies для shop.incyber.ru или откройте страницу в режиме инкогнито.</p>
         <?php if ($safeError !== ''): ?>
             <div class="error"><?php echo $safeError; ?></div>
         <?php endif; ?>
@@ -269,7 +289,7 @@ if ($requestMethod === 'POST' && $requestAction === 'login') {
         depersonalizerRedirectBack();
     }
 
-    renderAccessPage(true, 'Invalid access token.');
+    renderAccessPage(true, 'Неверный токен доступа.');
 }
 
 if ($requestMethod === 'POST' && $requestAction === 'logout') {
@@ -280,14 +300,14 @@ if ($requestMethod === 'POST' && $requestAction === 'logout') {
 
 if (!$accessConfigured) {
     if ($requestMethod === 'POST') {
-        jsonResponse(array('ok' => false, 'error' => 'Access token is not configured.'), 503);
+        jsonResponse(array('ok' => false, 'error' => 'Токен доступа не настроен.'), 503);
     }
     renderAccessPage(false);
 }
 
 if (!depersonalizerIsAuthorized($dbConfig)) {
     if ($requestMethod === 'POST') {
-        jsonResponse(array('ok' => false, 'error' => 'Unauthorized.'), 401);
+        jsonResponse(array('ok' => false, 'error' => 'Доступ не разрешен.'), 401);
     }
     renderAccessPage(true);
 }
@@ -308,9 +328,9 @@ $environment = depersonalizerDetectEnvironment($dbConfig);
 
 $missingConfigKeys = StandaloneConfigLoader::missingRequiredKeys($dbConfig);
 if ($missingConfigKeys) {
-    $source = (string)($dbConfig['__source'] ?? 'none');
-    $configError = 'Loaded config source: ' . ($source !== '' ? $source : 'none') .
-        '. Missing required key(s): ' . implode(', ', $missingConfigKeys) . '.';
+    $source = (string)($dbConfig['__source'] ?? '');
+    $configError = 'Загружен источник конфигурации: ' . ($source !== '' ? $source : 'нет') .
+        '. Не хватает обязательных ключей: ' . implode(', ', $missingConfigKeys) . '.';
 } else {
     try {
         $dsn = StandaloneConfigLoader::buildDsn($dbConfig);
@@ -334,7 +354,7 @@ if ($missingConfigKeys) {
         $preflight = $service->preflight($setupStateTable);
 
         if (!empty($preflight['missing_required_tables'])) {
-            $schemaError = 'Missing required tables: ' . implode(', ', $preflight['missing_required_tables']);
+            $schemaError = 'Отсутствуют обязательные таблицы: ' . implode(', ', $preflight['missing_required_tables']);
         }
     } catch (PDOException $error) {
         $dbConnectionError = $error->getMessage();
@@ -356,25 +376,25 @@ if ($requestMethod === 'POST') {
     $action = (string)($_POST['action'] ?? '');
 
     if (!in_array($action, array('preview', 'run'), true)) {
-        jsonResponse(array('ok' => false, 'error' => 'Unsupported action.'), 400);
+        jsonResponse(array('ok' => false, 'error' => 'Неподдерживаемое действие.'), 400);
     }
 
     $incomingToken = (string)($_POST['csrf_token'] ?? '');
     if (!hash_equals($csrfToken, $incomingToken)) {
-        jsonResponse(array('ok' => false, 'error' => 'CSRF token mismatch.'), 403);
+        jsonResponse(array('ok' => false, 'error' => 'CSRF token не совпадает.'), 403);
     }
 
     if (!$pageReady) {
-        $kind = 'schema';
+        $kind = 'Ошибка проверки схемы';
         $message = (string)$schemaError;
         if ($configError !== null) {
-            $kind = 'config';
+            $kind = 'Ошибка конфигурации';
             $message = $configError;
         } elseif ($dbConnectionError !== null) {
-            $kind = 'connection';
+            $kind = 'Ошибка подключения к БД';
             $message = $dbConnectionError;
         }
-        jsonResponse(array('ok' => false, 'error' => $kind . ' error: ' . $message), 500);
+        jsonResponse(array('ok' => false, 'error' => $kind . ': ' . $message), 500);
     }
 
     try {
@@ -394,6 +414,7 @@ if ($requestMethod === 'POST') {
             'dry_run' => readPostBool('dry_run'),
             'backup_confirmed' => readPostBool('backup_confirmed'),
             'confirmation_phrase' => (string)($_POST['confirmation_phrase'] ?? ''),
+            'run_id' => (string)($_POST['run_id'] ?? ''),
             'include_keys' => isset($_POST['include_keys']) && is_array($_POST['include_keys'])
                 ? array_values($_POST['include_keys'])
                 : array(),
@@ -403,13 +424,13 @@ if ($requestMethod === 'POST') {
             if (empty($environment['can_run_real'])) {
                 jsonResponse(array(
                     'ok' => false,
-                    'error' => 'Production-like environment is blocked. Set allow_prod => true in config.local.php only after verifying the target DB.',
+                    'error' => 'Обнаружена среда, похожая на продакшен. Установите allow_prod => true в config.local.php только после проверки целевой БД.',
                 ), 403);
             }
             if (empty($options['backup_confirmed']) || trim((string)$options['confirmation_phrase']) !== 'ANONYMIZE') {
                 jsonResponse(array(
                     'ok' => false,
-                    'error' => 'Real anonymization requires a fresh backup checkbox and exact ANONYMIZE confirmation.',
+                    'error' => 'Для реального обезличивания нужна отметка о свежей резервной копии и точное подтверждение ANONYMIZE.',
                 ), 400);
             }
         }
@@ -442,11 +463,11 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
 }
 ?>
 <!doctype html>
-<html lang="en">
+<html lang="ru">
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Webasyst Depersonalizer (Standalone)</title>
+    <title>Обезличивание Webasyst</title>
     <style>
         :root {
             --bg: #f5f6f8;
@@ -688,8 +709,8 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
 <div class="container">
     <div class="header">
         <div>
-            <h1>Webasyst Depersonalizer</h1>
-            <p class="subtitle">Standalone page. No plugin installation required.</p>
+            <h1>Обезличивание Webasyst</h1>
+            <p class="subtitle">Отдельная страница. Установка плагина не требуется.</p>
         </div>
         <div class="card" style="min-width: 320px; margin: 0;">
             <div style="margin-bottom: 8px;">
@@ -697,75 +718,75 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
                     <?php echo htmlspecialchars((string)$environment['label'], ENT_QUOTES, 'UTF-8'); ?>
                 </span>
                 <?php if (!empty($environment['is_prod']) && empty($environment['allow_prod'])): ?>
-                    <span style="margin-left: 8px; color: var(--danger); font-weight: 600;">real run blocked</span>
+                    <span style="margin-left: 8px; color: var(--danger); font-weight: 600;">реальный запуск заблокирован</span>
                 <?php endif; ?>
             </div>
-            <div><strong>Connection source:</strong> <code><?php echo htmlspecialchars((string)($dbConfig['__source'] ?? 'config.local.php / manual'), ENT_QUOTES, 'UTF-8'); ?></code></div>
-            <div style="margin-top: 6px;"><strong>DB:</strong> <code><?php echo htmlspecialchars((string)$dbConfig['database'], ENT_QUOTES, 'UTF-8'); ?></code></div>
+            <div><strong>Источник подключения:</strong> <code><?php echo htmlspecialchars((string)($dbConfig['__source'] ?? 'config.local.php / вручную'), ENT_QUOTES, 'UTF-8'); ?></code></div>
+            <div style="margin-top: 6px;"><strong>БД:</strong> <code><?php echo htmlspecialchars((string)$dbConfig['database'], ENT_QUOTES, 'UTF-8'); ?></code></div>
             <div style="margin-top: 6px;"><strong>MySQL:</strong> <code><?php echo htmlspecialchars($mysqlVersion, ENT_QUOTES, 'UTF-8'); ?></code></div>
             <div style="margin-top: 6px;"><strong>PHP:</strong> <code><?php echo htmlspecialchars(PHP_VERSION, ENT_QUOTES, 'UTF-8'); ?></code></div>
-            <div style="margin-top: 6px;"><strong>Schema:</strong> <code><?php echo $pageReady ? 'compatible' : 'not ready'; ?></code></div>
+            <div style="margin-top: 6px;"><strong>Схема:</strong> <code><?php echo $pageReady ? 'совместима' : 'не готова'; ?></code></div>
             <form method="post" style="margin-top: 10px;">
                 <input type="hidden" name="action" value="logout">
-                <button class="btn-ghost" type="submit">Lock</button>
+                <button class="btn-ghost" type="submit">Закрыть доступ</button>
             </form>
         </div>
     </div>
 
     <?php if ($configError !== null): ?>
         <div class="card error">
-            <strong>Config error:</strong>
+            <strong>Ошибка конфигурации:</strong>
             <div style="margin-top: 6px;"><?php echo htmlspecialchars($configError, ENT_QUOTES, 'UTF-8'); ?></div>
-            <div style="margin-top: 8px;">Use the flat <code>config.local.php</code> format from <code>config.local.php.example</code>. Password is never printed here.</div>
+            <div style="margin-top: 8px;">Используйте плоский формат <code>config.local.php</code> из <code>config.local.php.example</code>. Пароль здесь никогда не выводится.</div>
         </div>
     <?php endif; ?>
 
     <?php if ($dbConnectionError !== null): ?>
         <div class="card error">
-            <strong>DB connection error:</strong>
+            <strong>Ошибка подключения к БД:</strong>
             <div style="margin-top: 6px;"><?php echo htmlspecialchars($dbConnectionError, ENT_QUOTES, 'UTF-8'); ?></div>
-            <div style="margin-top: 8px;">The config was loaded, but PDO could not connect to MySQL.</div>
+            <div style="margin-top: 8px;">Конфигурация загружена, но PDO не смог подключиться к MySQL.</div>
         </div>
     <?php endif; ?>
 
     <?php if ($schemaError !== null): ?>
         <div class="card error">
-            <strong>Schema/preflight error:</strong>
+            <strong>Ошибка проверки схемы:</strong>
             <div style="margin-top: 6px;"><?php echo htmlspecialchars($schemaError, ENT_QUOTES, 'UTF-8'); ?></div>
-            <div style="margin-top: 8px;">Core order workflow requires only <code>shop_order</code> and <code>shop_order_params</code>. Optional contact tables are not required for page load.</div>
+            <div style="margin-top: 8px;">Основной сценарий по заказам требует только <code>shop_order</code> и <code>shop_order_params</code>. Необязательные таблицы контактов не нужны для загрузки страницы.</div>
         </div>
     <?php endif; ?>
 
     <?php if ($pageReady): ?>
         <div class="card warning">
-            <strong>Safe-mode behavior (to avoid Webasyst core conflicts)</strong>
+            <strong>Безопасный режим, чтобы не конфликтовать с ядром Webasyst</strong>
             <ul>
                 <?php foreach ($safeModeNotes as $line): ?>
                     <li><?php echo htmlspecialchars((string)$line, ENT_QUOTES, 'UTF-8'); ?></li>
                 <?php endforeach; ?>
             </ul>
             <div style="margin-top: 8px;">
-                Schema compatibility:
-                <code>wa_contact=<?php echo !empty($optionalTables['wa_contact']) ? 'yes' : 'no'; ?></code>,
-                <code>wa_contact_emails=<?php echo !empty($optionalTables['wa_contact_emails']) ? 'yes' : 'no'; ?></code>,
-                <code>wa_contact_data=<?php echo !empty($optionalTables['wa_contact_data']) ? 'yes' : 'no'; ?></code>,
-                <code>wa_contact_data_text=<?php echo !empty($optionalTables['wa_contact_data_text']) ? 'yes' : 'no'; ?></code>,
-                <code>wa_contact_addresses=<?php echo !empty($optionalTables['wa_contact_addresses']) ? 'yes' : 'no'; ?></code>,
-                <code>wa_contact_params=<?php echo !empty($optionalTables['wa_contact_params']) ? 'yes' : 'no'; ?></code>,
-                <code>state=<?php echo !empty($optionalTables['state_table_ready']) ? 'ready' : 'not ready'; ?></code>
+                Совместимость схемы:
+                <code>wa_contact=<?php echo !empty($optionalTables['wa_contact']) ? 'да' : 'нет'; ?></code>,
+                <code>wa_contact_emails=<?php echo !empty($optionalTables['wa_contact_emails']) ? 'да' : 'нет'; ?></code>,
+                <code>wa_contact_data=<?php echo !empty($optionalTables['wa_contact_data']) ? 'да' : 'нет'; ?></code>,
+                <code>wa_contact_data_text=<?php echo !empty($optionalTables['wa_contact_data_text']) ? 'да' : 'нет'; ?></code>,
+                <code>wa_contact_addresses=<?php echo !empty($optionalTables['wa_contact_addresses']) ? 'да' : 'нет'; ?></code>,
+                <code>wa_contact_params=<?php echo !empty($optionalTables['wa_contact_params']) ? 'да' : 'нет'; ?></code>,
+                <code>state=<?php echo !empty($optionalTables['state_table_ready']) ? 'готова' : 'не готова'; ?></code>
             </div>
             <?php if (empty($optionalTables['wa_contact_params'])): ?>
-                <div style="margin-top: 8px;">wa_contact_params is not present. Contact processing will use standalone state tracking in <code>depersonalizer_state</code>.</div>
+                <div style="margin-top: 8px;">wa_contact_params отсутствует. Обработка контактов будет использовать отдельную таблицу состояния <code>depersonalizer_state</code>.</div>
             <?php endif; ?>
             <?php if (empty($optionalTables['state_table_ready']) && !empty($optionalTables['state_table_error'])): ?>
-                <div style="margin-top: 8px;">State table issue: <?php echo htmlspecialchars((string)$optionalTables['state_table_error'], ENT_QUOTES, 'UTF-8'); ?></div>
+                <div style="margin-top: 8px;">Проблема с таблицей состояния: <?php echo htmlspecialchars((string)$optionalTables['state_table_error'], ENT_QUOTES, 'UTF-8'); ?></div>
             <?php endif; ?>
         </div>
 
         <?php if (!empty($environment['is_prod']) && empty($environment['allow_prod'])): ?>
             <div class="card error">
-                <strong>Production-like target detected.</strong>
-                <div style="margin-top: 6px;">Preview and dry-run are available, but real anonymization is blocked until <code>'allow_prod' =&gt; true</code> is set intentionally in local config.</div>
+                <strong>Обнаружена среда, похожая на продакшен.</strong>
+                <div style="margin-top: 6px;">Предпросмотр и пробный запуск доступны, но реальное обезличивание заблокировано, пока <code>'allow_prod' =&gt; true</code> не будет намеренно задано в локальной конфигурации.</div>
             </div>
         <?php endif; ?>
 
@@ -775,44 +796,44 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
 
                 <div class="grid">
                     <div>
-                        <label for="days">Retention days</label>
+                        <label for="days">Срок хранения, дней</label>
                         <input id="days" name="days" type="number" value="365" min="1" max="36500">
                     </div>
                     <div>
-                        <label for="limit">Batch size</label>
+                        <label for="limit">Размер пакета</label>
                         <input id="limit" name="limit" type="number" value="200" min="1" max="1000">
                     </div>
                     <div>
-                        <label>Order mark / contact state</label>
+                        <label>Метка заказа / состояние контакта</label>
                         <input type="text" value="_depersonalizer_ext_processed / depersonalizer_state" readonly>
                     </div>
                 </div>
 
                 <div class="checkbox-row">
-                    <label><input type="checkbox" name="keep_geo" value="1" checked> Keep geo snapshot in <code>geo_*</code></label>
-                    <label><input type="checkbox" name="wipe_comments" value="1"> Wipe order comments</label>
-                    <label><input type="checkbox" name="anonymize_contacts" value="1" <?php echo empty($optionalTables['wa_contact']) || empty($optionalTables['state_table_ready']) ? 'disabled' : ''; ?>> Anonymize contacts without newer orders</label>
-                    <label><input type="checkbox" name="dry_run" value="1" checked> Dry-run (no writes)</label>
+                    <label><input type="checkbox" name="keep_geo" value="1" checked> Сохранить гео-снимок в <code>geo_*</code></label>
+                    <label><input type="checkbox" name="wipe_comments" value="1"> Стереть комментарии заказов</label>
+                    <label><input type="checkbox" name="anonymize_contacts" value="1" <?php echo empty($optionalTables['wa_contact']) || empty($optionalTables['state_table_ready']) ? 'disabled' : ''; ?>> Обезличить контакты без новых заказов</label>
+                    <label><input type="checkbox" name="dry_run" value="1" checked> Пробный запуск без записи</label>
                 </div>
 
                 <div class="protection">
                     <div class="checkbox-row">
-                        <label><input type="checkbox" name="backup_confirmed" value="1"> I have a fresh database backup</label>
+                        <label><input type="checkbox" name="backup_confirmed" value="1"> У меня есть свежая резервная копия базы</label>
                     </div>
                     <div style="max-width: 320px; margin-top: 10px;">
-                        <label for="confirmation_phrase">Type ANONYMIZE for real run</label>
+                        <label for="confirmation_phrase">Для реального запуска введите ANONYMIZE</label>
                         <input id="confirmation_phrase" name="confirmation_phrase" type="text" value="" autocomplete="off">
                     </div>
                 </div>
 
                 <div class="actions">
-                    <button class="btn-ghost" type="button" id="previewBtn">Preview</button>
-                    <button class="btn-primary" type="button" id="runBtn">Run</button>
-                    <button class="btn-ghost" type="button" id="stopBtn" disabled>Stop</button>
+                    <button class="btn-ghost" type="button" id="previewBtn">Предпросмотр</button>
+                    <button class="btn-primary" type="button" id="runBtn">Запустить</button>
+                    <button class="btn-ghost" type="button" id="stopBtn" disabled>Остановить</button>
                 </div>
 
                 <div id="previewBlock" style="display:none; margin-top: 16px;">
-                    <strong>Candidate keys</strong>
+                    <strong>Найденные поля</strong>
                     <div id="previewInfo" class="status"></div>
                     <div id="keysList" class="klist"></div>
                 </div>
@@ -820,11 +841,11 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
         </div>
 
         <div class="card">
-            <strong>Progress</strong>
+            <strong>Ход выполнения</strong>
             <div class="progress-wrap">
                 <div id="progressBar" class="progress-bar"></div>
             </div>
-            <div id="progressText" class="status">Idle</div>
+            <div id="progressText" class="status">Ожидание</div>
             <div id="log" class="mono"></div>
         </div>
     <?php endif; ?>
@@ -847,6 +868,20 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
     const canRunReal = <?php echo !empty($environment['can_run_real']) ? 'true' : 'false'; ?>;
 
     let stopRequested = false;
+
+    function generateRunId() {
+        const bytes = new Uint8Array(8);
+        if (window.crypto && window.crypto.getRandomValues) {
+            window.crypto.getRandomValues(bytes);
+        } else {
+            for (let i = 0; i < bytes.length; i += 1) {
+                bytes[i] = Math.floor(Math.random() * 256);
+            }
+        }
+
+        const suffix = Array.from(bytes).map((value) => value.toString(16).padStart(2, '0')).join('');
+        return 'run_' + Date.now().toString(36) + '_' + suffix;
+    }
 
     function setBusy(isBusy) {
         previewBtn.disabled = isBusy;
@@ -888,10 +923,10 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
             return;
         }
         if (!canRunReal) {
-            throw new Error('Production-like environment is blocked until allow_prod is enabled in config.local.php.');
+            throw new Error('Обнаружена среда, похожая на продакшен. Реальный запуск заблокирован, пока allow_prod не включен в config.local.php.');
         }
         if (state.backup_confirmed !== '1' || state.confirmation_phrase !== 'ANONYMIZE') {
-            throw new Error('Disable dry-run only after checking the backup box and typing ANONYMIZE exactly.');
+            throw new Error('Отключайте пробный запуск только после отметки о резервной копии и точного ввода ANONYMIZE.');
         }
     }
 
@@ -926,7 +961,7 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
         keysList.innerHTML = '';
 
         if (!keys.length) {
-            keysList.innerHTML = '<div class="kitem">No candidate keys were detected.</div>';
+            keysList.innerHTML = '<div class="kitem">Подходящие поля не найдены.</div>';
             return;
         }
 
@@ -949,15 +984,15 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
         const percent = total > 0 ? Math.min(100, Math.round((progress / total) * 100)) : (done ? 100 : 0);
         progressBar.style.width = percent + '%';
         progressText.textContent = done
-            ? 'Completed: ' + progress + ' / ' + total
-            : 'Running: ' + progress + ' / ' + total + ' (' + percent + '%)';
+            ? 'Завершено: ' + progress + ' / ' + total
+            : 'Выполняется: ' + progress + ' / ' + total + ' (' + percent + '%)';
         progressText.className = 'status ' + (done ? 'ok' : '');
     }
 
     previewBtn.addEventListener('click', async function () {
         try {
             setBusy(true);
-            appendLog('Preview started.');
+            appendLog('Предпросмотр запущен.');
             const state = collectFormState();
             const result = await postAction({
                 action: 'preview',
@@ -966,14 +1001,14 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
             });
 
             previewBlock.style.display = 'block';
-            previewInfo.textContent = 'Orders before cutoff (' + result.cutoff + '): ' + result.total_orders;
+            previewInfo.textContent = 'Заказов до даты отсечения (' + result.cutoff + '): ' + result.total_orders;
             previewInfo.className = 'status ok';
             renderKeys(result.candidate_keys || []);
-            appendLog('Preview done. Old orders: ' + result.total_orders + '.');
+            appendLog('Предпросмотр завершен. Старых заказов: ' + result.total_orders + '.');
         } catch (error) {
             previewInfo.textContent = String(error.message || error);
             previewInfo.className = 'status err';
-            appendLog('Preview failed: ' + String(error.message || error));
+            appendLog('Ошибка предпросмотра: ' + String(error.message || error));
         } finally {
             setBusy(false);
         }
@@ -981,20 +1016,22 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
 
     stopBtn.addEventListener('click', function () {
         stopRequested = true;
-        appendLog('Stop requested by user. Current batch will finish first.');
+        appendLog('Запрошена остановка. Текущий пакет сначала завершится.');
     });
 
     runBtn.addEventListener('click', async function () {
         stopRequested = false;
         progressBar.style.width = '0%';
-        progressText.textContent = 'Starting...';
+        progressText.textContent = 'Запуск...';
         progressText.className = 'status';
 
         let cursor = 0;
+        const runId = generateRunId();
 
         try {
             validateRealRun(collectFormState());
             setBusy(true);
+            appendLog('Запуск начат. run_id=' + runId + '.');
             while (true) {
                 const state = collectFormState();
                 validateRealRun(state);
@@ -1011,6 +1048,7 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
                     dry_run: state.dry_run,
                     backup_confirmed: state.backup_confirmed,
                     confirmation_phrase: state.confirmation_phrase,
+                    run_id: runId,
                     include_keys: state.include_keys
                 };
 
@@ -1020,31 +1058,31 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
                 updateProgress(Number(data.progress || 0), Number(data.total || 0), Boolean(data.done));
 
                 appendLog(
-                    'Batch: orders processed=' + (data.processed_orders || []).length +
-                    ', skipped=' + Object.keys(data.skipped_orders || {}).length +
-                    ', contacts processed=' + (data.processed_contacts || []).length +
-                    ', contacts skipped=' + Object.keys(data.skipped_contacts || {}).length +
+                    'Пакет: обработано заказов=' + (data.processed_orders || []).length +
+                    ', пропущено заказов=' + Object.keys(data.skipped_orders || {}).length +
+                    ', обработано контактов=' + (data.processed_contacts || []).length +
+                    ', пропущено контактов=' + Object.keys(data.skipped_contacts || {}).length +
                     ', cursor=' + (data.cursor || 0) +
-                    ', dry_run=' + (data.dry_run ? 'yes' : 'no') +
+                    ', dry_run=' + (data.dry_run ? 'да' : 'нет') +
                     ', run_id=' + (data.run_id || 'n/a') +
                     ', log=' + (data.batch_log || 'n/a')
                 );
 
                 if (stopRequested) {
-                    progressText.textContent = 'Stopped by user at cursor=' + cursor;
+                    progressText.textContent = 'Остановлено пользователем на cursor=' + cursor;
                     progressText.className = 'status err';
                     break;
                 }
 
                 if (data.done) {
-                    appendLog('Run completed at cursor=' + cursor + '.');
+                    appendLog('Запуск завершен на cursor=' + cursor + '.');
                     break;
                 }
             }
         } catch (error) {
-            progressText.textContent = 'Failed: ' + String(error.message || error);
+            progressText.textContent = 'Ошибка: ' + String(error.message || error);
             progressText.className = 'status err';
-            appendLog('Run failed: ' + String(error.message || error));
+            appendLog('Ошибка запуска: ' + String(error.message || error));
         } finally {
             setBusy(false);
         }

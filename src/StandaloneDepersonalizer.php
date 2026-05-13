@@ -135,11 +135,11 @@ final class StandaloneDepersonalizer
                 'state_table_error'   => $stateError,
             ),
             'safe_mode_notes' => array(
-                'Only this tool owned depersonalizer_state table is created automatically.',
-                'Order and contact rows are updated in-place; IDs and relations are preserved.',
-                'Orders are marked in shop_order_params; contacts are marked in depersonalizer_state.',
-                'wa_contact_params is optional and is not required for page load or contact state.',
-                'Address rows are never deleted by this standalone tool.',
+                'Автоматически создается только принадлежащая этому инструменту таблица depersonalizer_state.',
+                'Строки заказов и контактов обновляются на месте; ID и связи сохраняются.',
+                'Заказы помечаются в shop_order_params, контакты - в depersonalizer_state.',
+                'wa_contact_params необязательна и не требуется для загрузки страницы или состояния контактов.',
+                'Строки адресов этот standalone-инструмент никогда не удаляет.',
             ),
         );
     }
@@ -228,6 +228,8 @@ final class StandaloneDepersonalizer
      */
     public function runBatch(array $options): array
     {
+        $this->runId = $this->resolveRunId($options['run_id'] ?? '');
+
         $days = $this->normalizeDays((int)($options['days'] ?? 365));
         $limit = $this->normalizeLimit((int)($options['limit'] ?? 200));
         $cursor = max(0, (int)($options['cursor'] ?? 0));
@@ -241,7 +243,7 @@ final class StandaloneDepersonalizer
             $backupConfirmed = !empty($options['backup_confirmed']);
             $confirmationPhrase = trim((string)($options['confirmation_phrase'] ?? ''));
             if (!$backupConfirmed || $confirmationPhrase !== 'ANONYMIZE') {
-                throw new RuntimeException('Real anonymization requires backup confirmation and exact ANONYMIZE phrase.');
+                throw new RuntimeException('Для реального обезличивания нужна отметка о резервной копии и точная фраза ANONYMIZE.');
             }
         }
 
@@ -360,7 +362,7 @@ final class StandaloneDepersonalizer
             if (!$dryRun && $this->pdo->inTransaction()) {
                 $this->pdo->rollBack();
             }
-            $this->log('error', 'Batch failed', array(
+            $this->log('error', 'Ошибка пакета', array(
                 'cursor' => $cursor,
                 'exception' => $error->getMessage(),
             ));
@@ -394,7 +396,7 @@ final class StandaloneDepersonalizer
 
         $batchLog = $this->writeBatchLog($batchPayload);
 
-        $this->log('info', 'Batch completed', array(
+        $this->log('info', 'Пакет завершен', array(
             'cursor_from' => $cursor,
             'cursor_to' => $nextCursor,
             'dry_run' => $dryRun,
@@ -514,21 +516,30 @@ final class StandaloneDepersonalizer
     }
 
     /**
-     * Save snapshot geo_* params based on existing country/region/city style keys.
+     * Save snapshot geo_* params based on existing geo-like order keys.
      *
      * @param int $orderId
      * @param array<string, string> $params
      */
     private function preserveGeoSnapshot(int $orderId, array $params): void
     {
-        $geoKeys = array('country', 'region', 'city');
-        $prefixes = array('', 'shipping_', 'billing_');
+        $sources = array(
+            'city' => array('shipping_address.city', 'billing_address.city', 'shipping_city', 'billing_city', 'city'),
+            'region' => array('shipping_address.region', 'billing_address.region', 'shipping_region', 'billing_region', 'region'),
+            'country' => array('shipping_address.country', 'billing_address.country', 'shipping_country', 'billing_country', 'country'),
+            'lat' => array('shipping_address.lat', 'billing_address.lat', 'shipping_lat', 'billing_lat', 'lat'),
+            'lng' => array('shipping_address.lng', 'billing_address.lng', 'shipping_lng', 'billing_lng', 'lng'),
+        );
 
-        foreach ($geoKeys as $geoKey) {
-            foreach ($prefixes as $prefix) {
-                $sourceKey = $prefix . $geoKey;
-                if (!empty($params[$sourceKey])) {
-                    $this->setOrderParam($orderId, 'geo_' . $geoKey, (string)$params[$sourceKey]);
+        foreach ($sources as $geoKey => $sourceKeys) {
+            $targetKey = 'geo_' . $geoKey;
+            if (array_key_exists($targetKey, $params) && trim((string)$params[$targetKey]) !== '') {
+                continue;
+            }
+
+            foreach ($sourceKeys as $sourceKey) {
+                if (array_key_exists($sourceKey, $params) && trim((string)$params[$sourceKey]) !== '') {
+                    $this->setOrderParam($orderId, $targetKey, (string)$params[$sourceKey]);
                     break;
                 }
             }
@@ -538,6 +549,10 @@ final class StandaloneDepersonalizer
     private function isPiiKey(string $key): bool
     {
         if ($this->isTechnicalParamKey($key)) {
+            return false;
+        }
+
+        if ($this->isExcludedCarrierPluginKey($key)) {
             return false;
         }
 
@@ -563,6 +578,18 @@ final class StandaloneDepersonalizer
     private function isTechnicalParamKey(string $key): bool
     {
         return preg_match('/(^|_)(id|code|plugin|module|rate|method|currency|tax|total|price|amount|sku|quantity|status|state|workflow)$/i', $key) === 1;
+    }
+
+    private function isExcludedCarrierPluginKey(string $key): bool
+    {
+        $lowerKey = strtolower($key);
+        foreach (array('sdekint_plugin.', 'cdek.', 'cdek_', 'sdek.', 'sdek_') as $prefix) {
+            if (strpos($lowerKey, $prefix) === 0) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function keyHasPersonalFragment(string $key): bool
@@ -869,7 +896,7 @@ final class StandaloneDepersonalizer
             try {
                 $this->ensureStateTable();
             } catch (Throwable $error) {
-                $this->log('error', 'Contact state table is unavailable', array(
+                $this->log('error', 'Таблица состояния контактов недоступна', array(
                     'exception' => $error->getMessage(),
                 ));
                 return 'state_table_missing';
@@ -980,7 +1007,7 @@ final class StandaloneDepersonalizer
                 entity_type VARCHAR(32) NOT NULL,
                 entity_id INT UNSIGNED NOT NULL,
                 processed_at DATETIME NOT NULL,
-                run_id VARCHAR(64) NOT NULL,
+                run_id VARCHAR(80) NOT NULL,
                 note VARCHAR(255) DEFAULT NULL,
                 payload TEXT DEFAULT NULL,
                 PRIMARY KEY (entity_type, entity_id),
@@ -1120,6 +1147,19 @@ final class StandaloneDepersonalizer
 
     /**
      * @param mixed $raw
+     */
+    private function resolveRunId($raw): string
+    {
+        $candidate = trim((string)$raw);
+        if (preg_match('/^[A-Za-z0-9_-]{8,80}$/', $candidate) === 1) {
+            return $candidate;
+        }
+
+        return date('YmdHis') . '-' . bin2hex(random_bytes(4));
+    }
+
+    /**
+     * @param mixed $raw
      * @return array<int, string>
      */
     private function normalizeIncludeKeys($raw): array
@@ -1182,7 +1222,7 @@ final class StandaloneDepersonalizer
     private function quoteIdentifier(string $identifier): string
     {
         if (!preg_match('/^[A-Za-z0-9_]+$/', $identifier)) {
-            throw new InvalidArgumentException('Unsafe identifier: ' . $identifier);
+            throw new InvalidArgumentException('Небезопасный идентификатор: ' . $identifier);
         }
 
         return '`' . $identifier . '`';
@@ -1236,7 +1276,7 @@ final class StandaloneDepersonalizer
     {
         if (!is_dir($path)) {
             if (!mkdir($path, 0755, true) && !is_dir($path)) {
-                throw new RuntimeException('Unable to create directory: ' . $path);
+                throw new RuntimeException('Не удалось создать директорию: ' . $path);
             }
         }
 

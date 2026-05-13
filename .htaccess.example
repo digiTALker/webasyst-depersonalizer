@@ -1,4 +1,4 @@
 AuthType Basic
-AuthName "Restricted"
+AuthName "Обезличивание Webasyst"
 AuthUserFile /home/d/dtalke/.htpasswd
 Require valid-user
