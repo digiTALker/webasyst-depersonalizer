@@ -159,6 +159,7 @@ final class StandaloneDepersonalizer
     {
         $days = $this->normalizeDays($days);
         $cutoff = $this->cutoff($days);
+        $oldOrdersTotal = $this->countAllOrdersOlderThan($cutoff);
 
         $countStmt = $this->pdo->prepare(
             'SELECT COUNT(*) AS cnt
@@ -215,8 +216,10 @@ final class StandaloneDepersonalizer
         return array(
             'days' => $days,
             'cutoff' => $cutoff,
+            'old_orders_total' => $oldOrdersTotal,
             'total_orders' => $totalOrders,
             'candidate_keys' => $keys,
+            'contact_catchup' => $this->previewContactCatchup($cutoff),
         );
     }
 
@@ -237,6 +240,7 @@ final class StandaloneDepersonalizer
         $keepGeo = !empty($options['keep_geo']);
         $wipeComments = !empty($options['wipe_comments']);
         $anonymizeContacts = !empty($options['anonymize_contacts']);
+        $contactCatchupOnly = !empty($options['contact_catchup_only']);
         $dryRun = !empty($options['dry_run']);
 
         if (!$dryRun) {
@@ -245,6 +249,10 @@ final class StandaloneDepersonalizer
             if (!$backupConfirmed || $confirmationPhrase !== 'ANONYMIZE') {
                 throw new RuntimeException('Для реального обезличивания нужна отметка о резервной копии и точная фраза ANONYMIZE.');
             }
+        }
+
+        if ($contactCatchupOnly) {
+            return $this->runContactCatchupBatch($days, $limit, $cursor, $dryRun);
         }
 
         if ($anonymizeContacts && !$dryRun && !$this->stateTableReady) {
@@ -384,6 +392,7 @@ final class StandaloneDepersonalizer
                 'keep_geo' => $keepGeo,
                 'wipe_comments' => $wipeComments,
                 'anonymize_contacts' => $anonymizeContacts,
+                'contact_catchup_only' => $contactCatchupOnly,
                 'include_keys' => $includeKeys,
             ),
             'cutoff' => $cutoff,
@@ -419,6 +428,120 @@ final class StandaloneDepersonalizer
             'skipped_orders' => $skippedOrders,
             'processed_contacts' => $processedContacts,
             'skipped_contacts' => $skippedContacts,
+            'dry_run' => $dryRun,
+            'run_id' => $this->runId,
+            'batch_log' => $batchLog,
+        );
+    }
+
+    /**
+     * Process contacts linked to old orders without touching order rows or order params.
+     *
+     * @return array<string, mixed>
+     */
+    private function runContactCatchupBatch(int $days, int $limit, int $cursor, bool $dryRun): array
+    {
+        if (!$this->tableExists('wa_contact')) {
+            throw new RuntimeException('Для догоняющей обработки контактов нужна таблица wa_contact.');
+        }
+
+        if (!$dryRun) {
+            $this->ensureStateTable();
+        } else {
+            $this->refreshStateTableReady();
+        }
+
+        $cutoff = $this->cutoff($days);
+        $total = $this->countContactCatchupCandidates($cutoff, 0);
+        $contactIds = $this->fetchContactCatchupBatch($cutoff, $cursor, $limit);
+
+        if (!$contactIds) {
+            return array(
+                'cutoff' => $cutoff,
+                'cursor' => $cursor,
+                'done' => true,
+                'batch_count' => 0,
+                'progress' => $total,
+                'total' => $total,
+                'processed_orders' => array(),
+                'skipped_orders' => array(),
+                'processed_contacts' => array(),
+                'skipped_contacts' => array(),
+                'dry_run' => $dryRun,
+                'run_id' => $this->runId,
+                'batch_log' => null,
+            );
+        }
+
+        if (!$dryRun) {
+            $this->pdo->beginTransaction();
+        }
+
+        try {
+            $contactResult = $dryRun
+                ? $this->simulateContacts($contactIds, $cutoff)
+                : $this->processContacts($contactIds, $cutoff);
+
+            if (!$dryRun) {
+                $this->pdo->commit();
+            }
+        } catch (Throwable $error) {
+            if (!$dryRun && $this->pdo->inTransaction()) {
+                $this->pdo->rollBack();
+            }
+            $this->log('error', 'Ошибка догоняющей обработки контактов', array(
+                'cursor' => $cursor,
+                'exception' => $error->getMessage(),
+            ));
+            throw $error;
+        }
+
+        $nextCursor = max($contactIds);
+        $done = !$this->hasContactCatchupAfterCursor($cutoff, $nextCursor);
+        $remainingAfterCursor = $this->countContactCatchupCandidates($cutoff, $nextCursor);
+        $progress = $done ? $total : max(0, $total - $remainingAfterCursor);
+
+        $batchPayload = array(
+            'run_id' => $this->runId,
+            'timestamp' => date('c'),
+            'dry_run' => $dryRun,
+            'options' => array(
+                'days' => $days,
+                'limit' => $limit,
+                'cursor' => $cursor,
+                'contact_catchup_only' => true,
+            ),
+            'cutoff' => $cutoff,
+            'processed_orders' => array(),
+            'skipped_orders' => array(),
+            'processed_contacts' => $contactResult['processed'],
+            'skipped_contacts' => $contactResult['skipped'],
+            'selected_include_keys' => array(),
+        );
+
+        $batchLog = $this->writeBatchLog($batchPayload);
+
+        $this->log('info', 'Пакет догоняющей обработки контактов завершен', array(
+            'cursor_from' => $cursor,
+            'cursor_to' => $nextCursor,
+            'dry_run' => $dryRun,
+            'processed_contacts' => count($contactResult['processed']),
+            'skipped_contacts' => count($contactResult['skipped']),
+            'run_id' => $this->runId,
+            'batch_log' => $batchLog,
+        ));
+
+        return array(
+            'cutoff' => $cutoff,
+            'cursor' => $nextCursor,
+            'done' => $done,
+            'batch_count' => count($contactIds),
+            'progress' => $progress,
+            'total' => $total,
+            'processed_orders' => array(),
+            'skipped_orders' => array(),
+            'processed_contacts' => $contactResult['processed'],
+            'skipped_contacts' => $contactResult['skipped'],
             'dry_run' => $dryRun,
             'run_id' => $this->runId,
             'batch_log' => $batchLog,
@@ -513,6 +636,52 @@ final class StandaloneDepersonalizer
             ':name' => $name,
             ':value' => $value,
         ));
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function previewContactCatchup(string $cutoff): array
+    {
+        $this->refreshStateTableReady();
+
+        $alreadyProcessed = $this->countAlreadyProcessedOldContacts($cutoff);
+        $withNewerOrders = $this->countOldContactsWithNewerOrders($cutoff);
+
+        if (!$this->tableExists('wa_contact')) {
+            return array(
+                'available' => false,
+                'candidate_contacts' => 0,
+                'eligible_contacts' => 0,
+                'already_processed_contacts' => $alreadyProcessed,
+                'contacts_with_newer_orders' => $withNewerOrders,
+                'protected_contacts' => 0,
+                'note' => 'Таблица wa_contact отсутствует, обработка контактов недоступна.',
+            );
+        }
+
+        $candidateContacts = $this->countContactCatchupCandidates($cutoff, 0);
+        $contactIds = $this->fetchContactCatchupBatch($cutoff, 0, 0);
+        $eligibleContacts = 0;
+        $protectedContacts = 0;
+
+        foreach ($contactIds as $contactId) {
+            if ($this->getContactAccountProtectionReason($contactId) === null) {
+                $eligibleContacts++;
+            } else {
+                $protectedContacts++;
+            }
+        }
+
+        return array(
+            'available' => true,
+            'candidate_contacts' => $candidateContacts,
+            'eligible_contacts' => $eligibleContacts,
+            'already_processed_contacts' => $alreadyProcessed,
+            'contacts_with_newer_orders' => $withNewerOrders,
+            'protected_contacts' => $protectedContacts,
+            'note' => '',
+        );
     }
 
     /**
@@ -640,7 +809,7 @@ final class StandaloneDepersonalizer
         $skipped = array();
 
         foreach ($contactIds as $contactId) {
-            $reason = $this->getContactSkipReason($contactId, $cutoff);
+            $reason = $this->getContactSkipReason($contactId, $cutoff, false);
             if ($reason !== null) {
                 $skipped[$contactId] = $reason;
                 continue;
@@ -662,7 +831,7 @@ final class StandaloneDepersonalizer
         $skipped = array();
 
         foreach ($contactIds as $contactId) {
-            $reason = $this->getContactSkipReason($contactId, $cutoff);
+            $reason = $this->getContactSkipReason($contactId, $cutoff, true);
             if ($reason !== null) {
                 $skipped[$contactId] = $reason;
                 continue;
@@ -866,7 +1035,7 @@ final class StandaloneDepersonalizer
         $stmt->execute($params);
     }
 
-    private function getContactSkipReason(int $contactId, string $cutoff): ?string
+    private function getContactSkipReason(int $contactId, string $cutoff, bool $allowStateSetup = true): ?string
     {
         if (!$this->tableExists('wa_contact')) {
             return 'wa_contact_missing';
@@ -892,7 +1061,8 @@ final class StandaloneDepersonalizer
             return 'has_newer_orders';
         }
 
-        if (!$this->stateTableReady) {
+        $this->refreshStateTableReady();
+        if (!$this->stateTableReady && $allowStateSetup) {
             try {
                 $this->ensureStateTable();
             } catch (Throwable $error) {
@@ -903,7 +1073,7 @@ final class StandaloneDepersonalizer
             }
         }
 
-        if ($this->isContactAlreadyProcessed($contactId)) {
+        if ($this->stateTableReady && $this->isContactAlreadyProcessed($contactId)) {
             return 'already_processed';
         }
 
@@ -1025,6 +1195,18 @@ final class StandaloneDepersonalizer
         return date('Y-m-d H:i:s', strtotime('-' . $days . ' days'));
     }
 
+    private function countAllOrdersOlderThan(string $cutoff): int
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT COUNT(*)
+             FROM shop_order
+             WHERE create_datetime < :cutoff'
+        );
+        $stmt->execute(array(':cutoff' => $cutoff));
+
+        return (int)$stmt->fetchColumn();
+    }
+
     private function countOrdersOlderThan(string $cutoff): int
     {
         $stmt = $this->pdo->prepare(
@@ -1123,6 +1305,148 @@ final class StandaloneDepersonalizer
         return (int)$stmt->fetchColumn();
     }
 
+    /**
+     * @return array<int, int>
+     */
+    private function fetchContactCatchupBatch(string $cutoff, int $cursor, int $limit): array
+    {
+        $this->refreshStateTableReady();
+
+        $sql = 'SELECT DISTINCT o.contact_id
+                FROM shop_order o
+                WHERE o.create_datetime < :cutoff
+                  AND o.contact_id IS NOT NULL
+                  AND o.contact_id > :cursor
+                  AND o.contact_id > 0
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM shop_order newer
+                      WHERE newer.contact_id = o.contact_id
+                        AND newer.create_datetime >= :cutoff_newer
+                  )' . $this->contactStateExclusionSql() . '
+                ORDER BY o.contact_id ASC';
+
+        if ($limit > 0) {
+            $sql .= ' LIMIT :limit';
+        }
+
+        $stmt = $this->pdo->prepare($sql);
+        $stmt->bindValue(':cutoff', $cutoff, PDO::PARAM_STR);
+        $stmt->bindValue(':cutoff_newer', $cutoff, PDO::PARAM_STR);
+        $stmt->bindValue(':cursor', $cursor, PDO::PARAM_INT);
+        if ($limit > 0) {
+            $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
+        }
+        $stmt->execute();
+
+        $ids = array();
+        while (($contactId = $stmt->fetchColumn()) !== false) {
+            $ids[] = (int)$contactId;
+        }
+
+        return $ids;
+    }
+
+    private function countContactCatchupCandidates(string $cutoff, int $cursor): int
+    {
+        $this->refreshStateTableReady();
+
+        $stmt = $this->pdo->prepare(
+            'SELECT COUNT(DISTINCT o.contact_id)
+             FROM shop_order o
+             WHERE o.create_datetime < :cutoff
+               AND o.contact_id IS NOT NULL
+               AND o.contact_id > :cursor
+               AND o.contact_id > 0
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM shop_order newer
+                   WHERE newer.contact_id = o.contact_id
+                     AND newer.create_datetime >= :cutoff_newer
+               )' . $this->contactStateExclusionSql()
+        );
+        $stmt->execute(array(
+            ':cutoff' => $cutoff,
+            ':cutoff_newer' => $cutoff,
+            ':cursor' => $cursor,
+        ));
+
+        return (int)$stmt->fetchColumn();
+    }
+
+    private function hasContactCatchupAfterCursor(string $cutoff, int $cursor): bool
+    {
+        $this->refreshStateTableReady();
+
+        $stmt = $this->pdo->prepare(
+            'SELECT 1
+             FROM shop_order o
+             WHERE o.create_datetime < :cutoff
+               AND o.contact_id IS NOT NULL
+               AND o.contact_id > :cursor
+               AND o.contact_id > 0
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM shop_order newer
+                   WHERE newer.contact_id = o.contact_id
+                     AND newer.create_datetime >= :cutoff_newer
+               )' . $this->contactStateExclusionSql() . '
+             LIMIT 1'
+        );
+        $stmt->execute(array(
+            ':cutoff' => $cutoff,
+            ':cutoff_newer' => $cutoff,
+            ':cursor' => $cursor,
+        ));
+
+        return (bool)$stmt->fetchColumn();
+    }
+
+    private function countAlreadyProcessedOldContacts(string $cutoff): int
+    {
+        $this->refreshStateTableReady();
+        if (!$this->stateTableReady) {
+            return 0;
+        }
+
+        $stmt = $this->pdo->prepare(
+            "SELECT COUNT(DISTINCT o.contact_id)
+             FROM shop_order o
+             INNER JOIN depersonalizer_state ds
+                ON ds.entity_type = 'contact'
+               AND ds.entity_id = o.contact_id
+             WHERE o.create_datetime < :cutoff
+               AND o.contact_id IS NOT NULL
+               AND o.contact_id > 0"
+        );
+        $stmt->execute(array(':cutoff' => $cutoff));
+
+        return (int)$stmt->fetchColumn();
+    }
+
+    private function countOldContactsWithNewerOrders(string $cutoff): int
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT COUNT(DISTINCT o.contact_id)
+             FROM shop_order o
+             WHERE o.create_datetime < :cutoff
+               AND o.contact_id IS NOT NULL
+               AND o.contact_id > 0
+               AND EXISTS (
+                   SELECT 1
+                   FROM shop_order newer
+                   WHERE newer.contact_id = o.contact_id
+                     AND newer.create_datetime >= :cutoff_newer
+               )'
+        );
+        $stmt->execute(array(
+            ':cutoff' => $cutoff,
+            ':cutoff_newer' => $cutoff,
+        ));
+
+        return (int)$stmt->fetchColumn();
+    }
+
     private function normalizeDays(int $days): int
     {
         if ($days < 1) {
@@ -1178,6 +1502,27 @@ final class StandaloneDepersonalizer
         }
 
         return array_keys($keys);
+    }
+
+    private function refreshStateTableReady(): void
+    {
+        if (!$this->stateTableReady && $this->tableExists(self::STATE_TABLE)) {
+            $this->stateTableReady = true;
+        }
+    }
+
+    private function contactStateExclusionSql(): string
+    {
+        if (!$this->stateTableReady) {
+            return '';
+        }
+
+        return " AND NOT EXISTS (
+                   SELECT 1
+                   FROM depersonalizer_state ds
+                   WHERE ds.entity_type = 'contact'
+                     AND ds.entity_id = o.contact_id
+               )";
     }
 
     private function tableExists(string $table): bool

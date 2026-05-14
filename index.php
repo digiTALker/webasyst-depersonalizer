@@ -411,6 +411,7 @@ if ($requestMethod === 'POST') {
             'keep_geo' => readPostBool('keep_geo'),
             'wipe_comments' => readPostBool('wipe_comments'),
             'anonymize_contacts' => readPostBool('anonymize_contacts'),
+            'contact_catchup_only' => readPostBool('contact_catchup_only'),
             'dry_run' => readPostBool('dry_run'),
             'backup_confirmed' => readPostBool('backup_confirmed'),
             'confirmation_phrase' => (string)($_POST['confirmation_phrase'] ?? ''),
@@ -684,6 +685,7 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
         .status {
             margin-top: 10px;
             font-size: 14px;
+            white-space: pre-line;
         }
 
         .status.ok {
@@ -702,6 +704,24 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
             background: #eef2f7;
             border-radius: 6px;
             padding: 2px 6px;
+        }
+
+        .tooltip-popover {
+            position: fixed;
+            z-index: 1000;
+            display: none;
+            max-width: 360px;
+            padding: 10px 12px;
+            border-radius: 8px;
+            background: #111827;
+            color: #fff;
+            font-size: 13px;
+            line-height: 1.45;
+            box-shadow: 0 10px 24px rgba(17, 24, 39, 0.22);
+        }
+
+        [data-tooltip] {
+            cursor: help;
         }
     </style>
 </head>
@@ -810,15 +830,16 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
                 </div>
 
                 <div class="checkbox-row">
-                    <label><input type="checkbox" name="keep_geo" value="1" checked> Сохранить гео-снимок в <code>geo_*</code></label>
-                    <label><input type="checkbox" name="wipe_comments" value="1"> Стереть комментарии заказов</label>
-                    <label><input type="checkbox" name="anonymize_contacts" value="1" <?php echo empty($optionalTables['wa_contact']) || empty($optionalTables['state_table_ready']) ? 'disabled' : ''; ?>> Обезличить контакты без новых заказов</label>
-                    <label><input type="checkbox" name="dry_run" value="1" checked> Пробный запуск без записи</label>
+                    <label tabindex="0" data-tooltip="Перед очисткой адресных полей сохраняет грубую географию в geo_city, geo_region, geo_country, geo_lat и geo_lng. Существующие непустые geo_* не перезаписываются."><input type="checkbox" name="keep_geo" value="1" checked> Сохранить гео-снимок в <code>geo_*</code></label>
+                    <label tabindex="0" data-tooltip="Очищает выбранные поля комментариев. Включайте только если в комментариях могут быть персональные данные."><input type="checkbox" name="wipe_comments" value="1"> Стереть комментарии заказов</label>
+                    <label tabindex="0" data-tooltip="Дополнительно обезличивает карточки контактов, у которых нет заказов новее выбранного срока хранения. Более рискованный режим, чем обработка только заказов."><input type="checkbox" name="anonymize_contacts" value="1" <?php echo empty($optionalTables['wa_contact']) || empty($optionalTables['state_table_ready']) ? 'disabled' : ''; ?>> Обезличить контакты без новых заказов</label>
+                    <label tabindex="0" data-tooltip="Обрабатывает контакты по старым заказам даже если сами заказы уже были обезличены и помечены как обработанные. Заказы при этом не меняются."><input type="checkbox" name="contact_catchup_only" value="1" <?php echo empty($optionalTables['wa_contact']) ? 'disabled' : ''; ?>> Только контакты по уже обработанным старым заказам</label>
+                    <label tabindex="0" data-tooltip="Показывает, что было бы обработано, но не записывает изменения в базу. Рекомендуется всегда сначала запускать этот режим."><input type="checkbox" name="dry_run" value="1" checked> Пробный запуск без записи</label>
                 </div>
 
                 <div class="protection">
                     <div class="checkbox-row">
-                        <label><input type="checkbox" name="backup_confirmed" value="1"> У меня есть свежая резервная копия базы</label>
+                        <label tabindex="0" data-tooltip="Подтверждение, что перед реальным запуском сделана свежая резервная копия базы. Без этого реальные изменения заблокированы."><input type="checkbox" name="backup_confirmed" value="1"> У меня есть свежая резервная копия базы</label>
                     </div>
                     <div style="max-width: 320px; margin-top: 10px;">
                         <label for="confirmation_phrase">Для реального запуска введите ANONYMIZE</label>
@@ -904,6 +925,7 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
             keep_geo: fd.get('keep_geo') ? '1' : '0',
             wipe_comments: fd.get('wipe_comments') ? '1' : '0',
             anonymize_contacts: fd.get('anonymize_contacts') ? '1' : '0',
+            contact_catchup_only: fd.get('contact_catchup_only') ? '1' : '0',
             dry_run: fd.get('dry_run') ? '1' : '0',
             backup_confirmed: fd.get('backup_confirmed') ? '1' : '0',
             confirmation_phrase: fd.get('confirmation_phrase') || '',
@@ -928,6 +950,68 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
         if (state.backup_confirmed !== '1' || state.confirmation_phrase !== 'ANONYMIZE') {
             throw new Error('Отключайте пробный запуск только после отметки о резервной копии и точного ввода ANONYMIZE.');
         }
+    }
+
+    function setupTooltips() {
+        const tooltip = document.createElement('div');
+        tooltip.className = 'tooltip-popover';
+        document.body.appendChild(tooltip);
+
+        let timer = null;
+        let activeNode = null;
+
+        function hideTooltip() {
+            if (timer !== null) {
+                window.clearTimeout(timer);
+                timer = null;
+            }
+            tooltip.style.display = 'none';
+            activeNode = null;
+        }
+
+        function showTooltip(node) {
+            const text = node.getAttribute('data-tooltip') || '';
+            if (text === '') {
+                return;
+            }
+
+            tooltip.textContent = text;
+            tooltip.style.display = 'block';
+
+            const rect = node.getBoundingClientRect();
+            const tooltipRect = tooltip.getBoundingClientRect();
+            const left = Math.max(12, Math.min(rect.left, window.innerWidth - tooltipRect.width - 12));
+            let top = rect.bottom + 8;
+            if (top + tooltipRect.height > window.innerHeight - 12) {
+                top = Math.max(12, rect.top - tooltipRect.height - 8);
+            }
+
+            tooltip.style.left = left + 'px';
+            tooltip.style.top = top + 'px';
+        }
+
+        function scheduleTooltip(node) {
+            hideTooltip();
+            activeNode = node;
+            timer = window.setTimeout(() => {
+                if (activeNode === node) {
+                    showTooltip(node);
+                }
+            }, 2000);
+        }
+
+        document.querySelectorAll('[data-tooltip]').forEach((node) => {
+            node.addEventListener('mouseenter', () => scheduleTooltip(node));
+            node.addEventListener('mouseleave', hideTooltip);
+            node.addEventListener('focusin', () => scheduleTooltip(node));
+            node.addEventListener('focusout', hideTooltip);
+        });
+
+        document.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape') {
+                hideTooltip();
+            }
+        });
     }
 
     async function postAction(payload) {
@@ -1001,10 +1085,25 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
             });
 
             previewBlock.style.display = 'block';
-            previewInfo.textContent = 'Заказов до даты отсечения (' + result.cutoff + '): ' + result.total_orders;
+            const contactCatchup = result.contact_catchup || {};
+            const previewLines = [
+                'Старых заказов всего (' + result.cutoff + '): ' + (result.old_orders_total || result.total_orders || 0),
+                'Заказов к обработке сейчас: ' + result.total_orders
+            ];
+
+            if (contactCatchup.available) {
+                previewLines.push('Контактов для догоняющей обработки: ' + (contactCatchup.eligible_contacts || 0));
+                previewLines.push('Контактов уже помечено обработанными: ' + (contactCatchup.already_processed_contacts || 0));
+                previewLines.push('Контактов с более новыми заказами: ' + (contactCatchup.contacts_with_newer_orders || 0));
+                previewLines.push('Защищенных контактов будет пропущено: ' + (contactCatchup.protected_contacts || 0));
+            } else if (contactCatchup.note) {
+                previewLines.push(contactCatchup.note);
+            }
+
+            previewInfo.textContent = previewLines.join('\n');
             previewInfo.className = 'status ok';
             renderKeys(result.candidate_keys || []);
-            appendLog('Предпросмотр завершен. Старых заказов: ' + result.total_orders + '.');
+            appendLog('Предпросмотр завершен. Заказов к обработке: ' + result.total_orders + ', контактов для догоняющей обработки: ' + (contactCatchup.eligible_contacts || 0) + '.');
         } catch (error) {
             previewInfo.textContent = String(error.message || error);
             previewInfo.className = 'status err';
@@ -1029,11 +1128,26 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
         const runId = generateRunId();
 
         try {
-            validateRealRun(collectFormState());
+            const initialState = collectFormState();
+            validateRealRun(initialState);
+            const runIsDryRun = initialState.dry_run === '1';
+            const storedConfirmationPhrase = initialState.confirmation_phrase;
+            if (!runIsDryRun) {
+                const confirmationInput = form.querySelector('input[name="confirmation_phrase"]');
+                if (confirmationInput) {
+                    confirmationInput.value = '';
+                }
+                appendLog('Поле подтверждения ANONYMIZE очищено для защиты от повторного реального запуска.');
+            }
+
             setBusy(true);
             appendLog('Запуск начат. run_id=' + runId + '.');
             while (true) {
                 const state = collectFormState();
+                state.dry_run = initialState.dry_run;
+                state.backup_confirmed = initialState.backup_confirmed;
+                state.confirmation_phrase = runIsDryRun ? state.confirmation_phrase : storedConfirmationPhrase;
+                state.contact_catchup_only = initialState.contact_catchup_only;
                 validateRealRun(state);
 
                 const payload = {
@@ -1045,6 +1159,7 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
                     keep_geo: state.keep_geo,
                     wipe_comments: state.wipe_comments,
                     anonymize_contacts: state.anonymize_contacts,
+                    contact_catchup_only: state.contact_catchup_only,
                     dry_run: state.dry_run,
                     backup_confirmed: state.backup_confirmed,
                     confirmation_phrase: state.confirmation_phrase,
@@ -1087,6 +1202,8 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
             setBusy(false);
         }
     });
+
+    setupTooltips();
 })();
 </script>
 <?php endif; ?>
