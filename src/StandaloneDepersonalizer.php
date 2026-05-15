@@ -5,6 +5,11 @@ final class StandaloneDepersonalizer
 {
     private const ORDER_PROCESSED_KEY = '_depersonalizer_ext_processed';
     private const ORDER_PROCESSED_AT_KEY = '_depersonalizer_ext_processed_at';
+    private const ORDER_LOG_PROCESSED_KEY = '_depersonalizer_order_log_processed';
+    private const ORDER_LOG_PROCESSED_AT_KEY = '_depersonalizer_order_log_processed_at';
+    private const PLACEHOLDER_NAME = 'Обезличен';
+    private const PLACEHOLDER_HISTORY = 'Запись истории заказа обезличена';
+    private const PLACEHOLDER_EMAIL_DOMAIN = 'obezlicheno.invalid';
 
     private const STATE_TABLE = 'depersonalizer_state';
 
@@ -22,6 +27,9 @@ final class StandaloneDepersonalizer
 
     /** @var array<string, array<int, string>> */
     private $tableColumnsCache = array();
+
+    /** @var array<string, array<string, string>> */
+    private $tableColumnTypesCache = array();
 
     /** @var bool */
     private $stateTableReady = false;
@@ -220,6 +228,8 @@ final class StandaloneDepersonalizer
             'total_orders' => $totalOrders,
             'candidate_keys' => $keys,
             'contact_catchup' => $this->previewContactCatchup($cutoff),
+            'order_history' => $this->previewOrderHistory($cutoff),
+            'placeholder_normalization' => $this->previewPlaceholderNormalization($cutoff),
         );
     }
 
@@ -241,7 +251,9 @@ final class StandaloneDepersonalizer
         $wipeComments = !empty($options['wipe_comments']);
         $anonymizeContacts = !empty($options['anonymize_contacts']);
         $contactCatchupOnly = !empty($options['contact_catchup_only']);
+        $anonymizeOrderHistory = !empty($options['anonymize_order_history']);
         $dryRun = !empty($options['dry_run']);
+        $historyCursor = max(0, (int)($options['history_cursor'] ?? 0));
 
         if (!$dryRun) {
             $backupConfirmed = !empty($options['backup_confirmed']);
@@ -252,7 +264,7 @@ final class StandaloneDepersonalizer
         }
 
         if ($contactCatchupOnly) {
-            return $this->runContactCatchupBatch($days, $limit, $cursor, $dryRun);
+            return $this->runContactCatchupBatch($days, $limit, $cursor, $dryRun, $anonymizeOrderHistory, $historyCursor);
         }
 
         if ($anonymizeContacts && !$dryRun && !$this->stateTableReady) {
@@ -263,38 +275,28 @@ final class StandaloneDepersonalizer
         $includeMap = array_fill_keys($includeKeys, true);
 
         $cutoff = $this->cutoff($days);
-        $total = $this->countOrdersOlderThan($cutoff);
+        $orderTotal = $this->countOrdersOlderThan($cutoff);
 
         $orders = $this->fetchOrdersBatch($cutoff, $cursor, $limit);
-        if (!$orders) {
-            return array(
-                'cutoff' => $cutoff,
-                'cursor' => $cursor,
-                'done' => true,
-                'batch_count' => 0,
-                'progress' => $this->countOrdersUpToCursor($cutoff, $cursor),
-                'total' => $total,
-                'processed_orders' => array(),
-                'skipped_orders' => array(),
-                'processed_contacts' => array(),
-                'skipped_contacts' => array(),
-                'dry_run' => $dryRun,
-                'run_id' => $this->runId,
-                'batch_log' => null,
-            );
-        }
-
         $processedOrders = array();
         $skippedOrders = array();
         $processedContacts = array();
         $skippedContacts = array();
         $contactIds = array();
+        $historyResult = $this->emptyOrderHistoryResult($historyCursor);
+        $normalizationResult = $this->emptyNormalizationResult();
 
         if (!$dryRun) {
             $this->pdo->beginTransaction();
         }
 
         try {
+            $normalizationResult = $this->runPlaceholderNormalization($cutoff, true, true, $anonymizeOrderHistory, $dryRun);
+
+            if ($anonymizeOrderHistory) {
+                $historyResult = $this->runOrderHistoryBatch($cutoff, $historyCursor, $limit, $dryRun);
+            }
+
             foreach ($orders as $order) {
                 $orderId = (int)$order['id'];
                 $contactId = (int)$order['contact_id'];
@@ -377,9 +379,12 @@ final class StandaloneDepersonalizer
             throw $error;
         }
 
-        $nextCursor = (int)$orders[count($orders) - 1]['id'];
-        $done = !$this->hasOrdersAfterCursor($cutoff, $nextCursor);
-        $progress = max(0, $total - $this->countOrdersAfterCursor($cutoff, $nextCursor));
+        $nextCursor = $orders ? (int)$orders[count($orders) - 1]['id'] : $cursor;
+        $ordersDone = $orders ? !$this->hasOrdersAfterCursor($cutoff, $nextCursor) : true;
+        $orderProgress = $orders ? max(0, $orderTotal - $this->countOrdersAfterCursor($cutoff, $nextCursor)) : $this->countOrdersUpToCursor($cutoff, $cursor);
+        $done = $ordersDone && (empty($historyResult['enabled']) || !empty($historyResult['done']));
+        $total = $orderTotal + (int)$historyResult['total'];
+        $progress = $orderProgress + (int)$historyResult['progress'];
 
         $batchPayload = array(
             'run_id' => $this->runId,
@@ -389,10 +394,12 @@ final class StandaloneDepersonalizer
                 'days' => $days,
                 'limit' => $limit,
                 'cursor' => $cursor,
+                'history_cursor' => $historyCursor,
                 'keep_geo' => $keepGeo,
                 'wipe_comments' => $wipeComments,
                 'anonymize_contacts' => $anonymizeContacts,
                 'contact_catchup_only' => $contactCatchupOnly,
+                'anonymize_order_history' => $anonymizeOrderHistory,
                 'include_keys' => $includeKeys,
             ),
             'cutoff' => $cutoff,
@@ -400,6 +407,10 @@ final class StandaloneDepersonalizer
             'skipped_orders' => $skippedOrders,
             'processed_contacts' => $processedContacts,
             'skipped_contacts' => $skippedContacts,
+            'processed_history_rows' => (int)$historyResult['processed_rows'],
+            'skipped_history_rows' => (int)$historyResult['skipped_rows'],
+            'normalized_placeholders' => (int)$normalizationResult['total'],
+            'normalization_breakdown' => $normalizationResult['breakdown'],
             'selected_include_keys' => $includeKeys,
         );
 
@@ -413,6 +424,8 @@ final class StandaloneDepersonalizer
             'processed_contacts' => count($processedContacts),
             'skipped_orders' => count($skippedOrders),
             'skipped_contacts' => count($skippedContacts),
+            'processed_history_rows' => (int)$historyResult['processed_rows'],
+            'normalized_placeholders' => (int)$normalizationResult['total'],
             'run_id' => $this->runId,
             'batch_log' => $batchLog,
         ));
@@ -428,6 +441,13 @@ final class StandaloneDepersonalizer
             'skipped_orders' => $skippedOrders,
             'processed_contacts' => $processedContacts,
             'skipped_contacts' => $skippedContacts,
+            'processed_history_rows' => (int)$historyResult['processed_rows'],
+            'skipped_history_rows' => (int)$historyResult['skipped_rows'],
+            'history_cursor' => (int)$historyResult['cursor'],
+            'history_done' => !empty($historyResult['done']),
+            'history_total' => (int)$historyResult['total'],
+            'normalized_placeholders' => (int)$normalizationResult['total'],
+            'normalization_breakdown' => $normalizationResult['breakdown'],
             'dry_run' => $dryRun,
             'run_id' => $this->runId,
             'batch_log' => $batchLog,
@@ -439,7 +459,7 @@ final class StandaloneDepersonalizer
      *
      * @return array<string, mixed>
      */
-    private function runContactCatchupBatch(int $days, int $limit, int $cursor, bool $dryRun): array
+    private function runContactCatchupBatch(int $days, int $limit, int $cursor, bool $dryRun, bool $anonymizeOrderHistory, int $historyCursor): array
     {
         if (!$this->tableExists('wa_contact')) {
             throw new RuntimeException('Для догоняющей обработки контактов нужна таблица wa_contact.');
@@ -454,30 +474,20 @@ final class StandaloneDepersonalizer
         $cutoff = $this->cutoff($days);
         $total = $this->countContactCatchupCandidates($cutoff, 0);
         $contactIds = $this->fetchContactCatchupBatch($cutoff, $cursor, $limit);
-
-        if (!$contactIds) {
-            return array(
-                'cutoff' => $cutoff,
-                'cursor' => $cursor,
-                'done' => true,
-                'batch_count' => 0,
-                'progress' => $total,
-                'total' => $total,
-                'processed_orders' => array(),
-                'skipped_orders' => array(),
-                'processed_contacts' => array(),
-                'skipped_contacts' => array(),
-                'dry_run' => $dryRun,
-                'run_id' => $this->runId,
-                'batch_log' => null,
-            );
-        }
+        $historyResult = $this->emptyOrderHistoryResult($historyCursor);
+        $normalizationResult = $this->emptyNormalizationResult();
 
         if (!$dryRun) {
             $this->pdo->beginTransaction();
         }
 
         try {
+            $normalizationResult = $this->runPlaceholderNormalization($cutoff, false, true, $anonymizeOrderHistory, $dryRun);
+
+            if ($anonymizeOrderHistory) {
+                $historyResult = $this->runOrderHistoryBatch($cutoff, $historyCursor, $limit, $dryRun);
+            }
+
             $contactResult = $dryRun
                 ? $this->simulateContacts($contactIds, $cutoff)
                 : $this->processContacts($contactIds, $cutoff);
@@ -496,10 +506,13 @@ final class StandaloneDepersonalizer
             throw $error;
         }
 
-        $nextCursor = max($contactIds);
-        $done = !$this->hasContactCatchupAfterCursor($cutoff, $nextCursor);
-        $remainingAfterCursor = $this->countContactCatchupCandidates($cutoff, $nextCursor);
-        $progress = $done ? $total : max(0, $total - $remainingAfterCursor);
+        $nextCursor = $contactIds ? max($contactIds) : $cursor;
+        $contactsDone = $contactIds ? !$this->hasContactCatchupAfterCursor($cutoff, $nextCursor) : true;
+        $remainingAfterCursor = $contactIds ? $this->countContactCatchupCandidates($cutoff, $nextCursor) : 0;
+        $contactProgress = $contactsDone ? $total : max(0, $total - $remainingAfterCursor);
+        $done = $contactsDone && (empty($historyResult['enabled']) || !empty($historyResult['done']));
+        $combinedTotal = $total + (int)$historyResult['total'];
+        $combinedProgress = $contactProgress + (int)$historyResult['progress'];
 
         $batchPayload = array(
             'run_id' => $this->runId,
@@ -509,13 +522,19 @@ final class StandaloneDepersonalizer
                 'days' => $days,
                 'limit' => $limit,
                 'cursor' => $cursor,
+                'history_cursor' => $historyCursor,
                 'contact_catchup_only' => true,
+                'anonymize_order_history' => $anonymizeOrderHistory,
             ),
             'cutoff' => $cutoff,
             'processed_orders' => array(),
             'skipped_orders' => array(),
             'processed_contacts' => $contactResult['processed'],
             'skipped_contacts' => $contactResult['skipped'],
+            'processed_history_rows' => (int)$historyResult['processed_rows'],
+            'skipped_history_rows' => (int)$historyResult['skipped_rows'],
+            'normalized_placeholders' => (int)$normalizationResult['total'],
+            'normalization_breakdown' => $normalizationResult['breakdown'],
             'selected_include_keys' => array(),
         );
 
@@ -527,6 +546,8 @@ final class StandaloneDepersonalizer
             'dry_run' => $dryRun,
             'processed_contacts' => count($contactResult['processed']),
             'skipped_contacts' => count($contactResult['skipped']),
+            'processed_history_rows' => (int)$historyResult['processed_rows'],
+            'normalized_placeholders' => (int)$normalizationResult['total'],
             'run_id' => $this->runId,
             'batch_log' => $batchLog,
         ));
@@ -536,12 +557,19 @@ final class StandaloneDepersonalizer
             'cursor' => $nextCursor,
             'done' => $done,
             'batch_count' => count($contactIds),
-            'progress' => $progress,
-            'total' => $total,
+            'progress' => $combinedProgress,
+            'total' => $combinedTotal,
             'processed_orders' => array(),
             'skipped_orders' => array(),
             'processed_contacts' => $contactResult['processed'],
             'skipped_contacts' => $contactResult['skipped'],
+            'processed_history_rows' => (int)$historyResult['processed_rows'],
+            'skipped_history_rows' => (int)$historyResult['skipped_rows'],
+            'history_cursor' => (int)$historyResult['cursor'],
+            'history_done' => !empty($historyResult['done']),
+            'history_total' => (int)$historyResult['total'],
+            'normalized_placeholders' => (int)$normalizationResult['total'],
+            'normalization_breakdown' => $normalizationResult['breakdown'],
             'dry_run' => $dryRun,
             'run_id' => $this->runId,
             'batch_log' => $batchLog,
@@ -685,6 +713,52 @@ final class StandaloneDepersonalizer
     }
 
     /**
+     * @return array<string, mixed>
+     */
+    private function previewOrderHistory(string $cutoff): array
+    {
+        if (!$this->tableExists('shop_order_log')) {
+            return array(
+                'available' => false,
+                'table' => 'shop_order_log',
+                'columns' => array(),
+                'rows_to_process' => 0,
+                'already_marked_orders' => 0,
+                'note' => 'Таблица shop_order_log отсутствует.',
+            );
+        }
+
+        $columns = $this->getOrderHistoryTextColumns();
+        if (!$columns) {
+            return array(
+                'available' => false,
+                'table' => 'shop_order_log',
+                'columns' => array(),
+                'rows_to_process' => 0,
+                'already_marked_orders' => $this->countOrderHistoryMarkedOrders($cutoff),
+                'note' => 'В shop_order_log не найдены безопасные текстовые колонки для обработки.',
+            );
+        }
+
+        return array(
+            'available' => true,
+            'table' => 'shop_order_log',
+            'columns' => $columns,
+            'rows_to_process' => $this->countOrderHistoryRows($cutoff, 0, $columns),
+            'already_marked_orders' => $this->countOrderHistoryMarkedOrders($cutoff),
+            'note' => '',
+        );
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function previewPlaceholderNormalization(string $cutoff): array
+    {
+        return $this->runPlaceholderNormalization($cutoff, true, true, true, true);
+    }
+
+    /**
      * Save snapshot geo_* params based on existing geo-like order keys.
      *
      * @param int $orderId
@@ -777,16 +851,16 @@ final class StandaloneDepersonalizer
     private function maskOrderParam(string $key, string $value, int $orderId): string
     {
         if (preg_match('/email/i', $key) === 1) {
-            return 'anon+order_' . $orderId . '@example.invalid';
+            return 'obezlicheno+order_' . $orderId . '@' . self::PLACEHOLDER_EMAIL_DOMAIN;
         }
         if (preg_match('/phone/i', $key) === 1) {
-            return 'anon-order-' . sha1((string)$orderId);
+            return 'obezlicheno-order-' . sha1((string)$orderId);
         }
         if (preg_match('/(firstname|middlename|lastname|name|company)/i', $key) === 1) {
-            return 'Deleted';
+            return self::PLACEHOLDER_NAME;
         }
         if (preg_match('/user_agent/i', $key) === 1) {
-            return 'unknown';
+            return 'обезличено';
         }
         if (preg_match('/(^|[_\-.])ip($|[_\-.])|ip_address|remote_addr/i', $key) === 1) {
             return '0.0.0.0';
@@ -854,8 +928,8 @@ final class StandaloneDepersonalizer
     private function updateContactCore(int $contactId): void
     {
         $values = array(
-            'name' => 'Deleted',
-            'firstname' => 'Deleted',
+            'name' => self::PLACEHOLDER_NAME,
+            'firstname' => self::PLACEHOLDER_NAME,
             'middlename' => '',
             'lastname' => '',
             'title' => '',
@@ -899,7 +973,7 @@ final class StandaloneDepersonalizer
             return;
         }
 
-        $sets = array("email = CONCAT('anon+contact_', contact_id, '_', id, '@example.invalid')");
+        $sets = array("email = CONCAT('obezlicheno+contact_', contact_id, '_', id, '@" . self::PLACEHOLDER_EMAIL_DOMAIN . "')");
         if ($this->tableHasColumn('wa_contact_emails', 'status')) {
             $sets[] = "status = 'unavailable'";
         }
@@ -923,7 +997,7 @@ final class StandaloneDepersonalizer
              SET value = CASE
                  WHEN field = 'phone' OR field LIKE 'phone.%' OR field LIKE '%phone%' THEN :phone
                  WHEN field = 'email' OR field LIKE 'email.%' OR field LIKE '%email%' THEN :email
-                 WHEN field LIKE '%name%' OR field LIKE '%company%' THEN 'Deleted'
+                 WHEN field LIKE '%name%' OR field LIKE '%company%' THEN :name
                  ELSE ''
              END
              WHERE contact_id = :contact_id
@@ -948,8 +1022,9 @@ final class StandaloneDepersonalizer
                )"
         );
         $stmt->execute(array(
-            ':phone' => 'anon-contact-' . sha1((string)$contactId),
-            ':email' => 'anon+contact_' . $contactId . '@example.invalid',
+            ':phone' => 'obezlicheno-contact-' . sha1((string)$contactId),
+            ':email' => 'obezlicheno+contact_' . $contactId . '@' . self::PLACEHOLDER_EMAIL_DOMAIN,
+            ':name' => self::PLACEHOLDER_NAME,
             ':contact_id' => $contactId,
         ));
     }
@@ -1006,7 +1081,7 @@ final class StandaloneDepersonalizer
             'region' => '',
             'country' => '',
             'address' => '',
-            'phone' => 'anon-contact-' . sha1((string)$contactId),
+            'phone' => 'obezlicheno-contact-' . sha1((string)$contactId),
             'comment' => '',
             'value' => '',
             'data' => '',
@@ -1188,6 +1263,542 @@ final class StandaloneDepersonalizer
 
         $this->tableExistsCache[self::STATE_TABLE] = true;
         $this->stateTableReady = true;
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function emptyOrderHistoryResult(int $cursor): array
+    {
+        return array(
+            'enabled' => false,
+            'available' => false,
+            'cursor' => $cursor,
+            'done' => true,
+            'total' => 0,
+            'progress' => 0,
+            'processed_rows' => 0,
+            'skipped_rows' => 0,
+            'columns' => array(),
+            'note' => '',
+        );
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function emptyNormalizationResult(): array
+    {
+        return array(
+            'total' => 0,
+            'breakdown' => array(
+                'order_params' => 0,
+                'contacts' => 0,
+                'order_history' => 0,
+            ),
+        );
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function runOrderHistoryBatch(string $cutoff, int $cursor, int $limit, bool $dryRun): array
+    {
+        $result = $this->emptyOrderHistoryResult($cursor);
+        $result['enabled'] = true;
+
+        if (!$this->tableExists('shop_order_log')) {
+            $result['note'] = 'Таблица shop_order_log отсутствует.';
+            return $result;
+        }
+
+        $columns = $this->getOrderHistoryTextColumns();
+        $result['columns'] = $columns;
+        if (!$columns) {
+            $result['note'] = 'В shop_order_log не найдены безопасные текстовые колонки для обработки.';
+            return $result;
+        }
+
+        $result['available'] = true;
+        $total = $this->countOrderHistoryRows($cutoff, 0, $columns);
+        $orderIds = $this->fetchOrderHistoryOrderIds($cutoff, $cursor, $limit, $columns);
+        $processedRows = $orderIds ? $this->countOrderHistoryRowsForOrderIds($orderIds, $columns) : 0;
+
+        if ($orderIds && !$dryRun) {
+            $this->sanitizeOrderHistoryRows($orderIds, $columns);
+            foreach ($orderIds as $orderId) {
+                $this->setOrderParam($orderId, self::ORDER_LOG_PROCESSED_KEY, '1');
+                $this->setOrderParam($orderId, self::ORDER_LOG_PROCESSED_AT_KEY, date('Y-m-d H:i:s'));
+            }
+        }
+
+        $nextCursor = $orderIds ? max($orderIds) : $cursor;
+        $done = $orderIds ? !$this->hasOrderHistoryAfterCursor($cutoff, $nextCursor, $columns) : true;
+        $remainingAfterCursor = $orderIds ? $this->countOrderHistoryRows($cutoff, $nextCursor, $columns) : 0;
+
+        $result['cursor'] = $nextCursor;
+        $result['done'] = $done;
+        $result['total'] = $total;
+        $result['progress'] = $done ? $total : max(0, $total - $remainingAfterCursor);
+        $result['processed_rows'] = $processedRows;
+
+        return $result;
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private function getOrderHistoryTextColumns(): array
+    {
+        if (!$this->tableExists('shop_order_log') || !$this->tableHasColumn('shop_order_log', 'order_id')) {
+            return array();
+        }
+
+        $columns = array();
+        foreach ($this->tableColumnTypes('shop_order_log') as $column => $type) {
+            if ($this->isOrderHistoryTextColumn($column, $type)) {
+                $columns[] = $column;
+            }
+        }
+
+        return $columns;
+    }
+
+    private function isOrderHistoryTextColumn(string $column, string $type): bool
+    {
+        $column = strtolower($column);
+        $type = strtolower($type);
+
+        $excluded = array(
+            'id',
+            'order_id',
+            'contact_id',
+            'action_id',
+            'state_id',
+            'before_state_id',
+            'after_state_id',
+            'datetime',
+            'create_datetime',
+            'update_datetime',
+            'date',
+            'workflow',
+            'status',
+            'app_id',
+            'plugin',
+            'params_hash',
+        );
+        if (in_array($column, $excluded, true)) {
+            return false;
+        }
+
+        $allowed = array(
+            'text',
+            'comment',
+            'description',
+            'details',
+            'message',
+            'contact_name',
+            'actor_name',
+            'name',
+            'value',
+        );
+        if (!in_array($column, $allowed, true)) {
+            return false;
+        }
+
+        return $this->isTextColumnType($type);
+    }
+
+    private function isTextColumnType(string $type): bool
+    {
+        return preg_match('/char|text|varchar|mediumtext|longtext|tinytext/i', $type) === 1;
+    }
+
+    /**
+     * @param array<int, string> $columns
+     */
+    private function countOrderHistoryRows(string $cutoff, int $cursor, array $columns): int
+    {
+        if (!$columns) {
+            return 0;
+        }
+
+        $stmt = $this->pdo->prepare(
+            'SELECT COUNT(*)
+             FROM shop_order_log l
+             INNER JOIN shop_order o ON o.id = l.order_id
+             WHERE o.create_datetime < :cutoff
+               AND o.id > :cursor
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM shop_order_params done
+                   WHERE done.order_id = o.id
+                     AND done.name = :processed_key
+                     AND done.value = :processed_value
+               )
+               AND (' . $this->orderHistoryTextCondition('l', $columns) . ')'
+        );
+        $stmt->execute(array(
+            ':cutoff' => $cutoff,
+            ':cursor' => $cursor,
+            ':processed_key' => self::ORDER_LOG_PROCESSED_KEY,
+            ':processed_value' => '1',
+        ));
+
+        return (int)$stmt->fetchColumn();
+    }
+
+    private function countOrderHistoryMarkedOrders(string $cutoff): int
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT COUNT(DISTINCT o.id)
+             FROM shop_order o
+             INNER JOIN shop_order_params done
+                ON done.order_id = o.id
+               AND done.name = :processed_key
+               AND done.value = :processed_value
+             WHERE o.create_datetime < :cutoff'
+        );
+        $stmt->execute(array(
+            ':cutoff' => $cutoff,
+            ':processed_key' => self::ORDER_LOG_PROCESSED_KEY,
+            ':processed_value' => '1',
+        ));
+
+        return (int)$stmt->fetchColumn();
+    }
+
+    /**
+     * @param array<int, string> $columns
+     * @return array<int, int>
+     */
+    private function fetchOrderHistoryOrderIds(string $cutoff, int $cursor, int $limit, array $columns): array
+    {
+        if (!$columns) {
+            return array();
+        }
+
+        $sql = 'SELECT DISTINCT o.id
+                FROM shop_order o
+                INNER JOIN shop_order_log l ON l.order_id = o.id
+                WHERE o.create_datetime < :cutoff
+                  AND o.id > :cursor
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM shop_order_params done
+                      WHERE done.order_id = o.id
+                        AND done.name = :processed_key
+                        AND done.value = :processed_value
+                  )
+                  AND (' . $this->orderHistoryTextCondition('l', $columns) . ')
+                ORDER BY o.id ASC
+                LIMIT :limit';
+
+        $stmt = $this->pdo->prepare($sql);
+        $stmt->bindValue(':cutoff', $cutoff, PDO::PARAM_STR);
+        $stmt->bindValue(':cursor', $cursor, PDO::PARAM_INT);
+        $stmt->bindValue(':processed_key', self::ORDER_LOG_PROCESSED_KEY, PDO::PARAM_STR);
+        $stmt->bindValue(':processed_value', '1', PDO::PARAM_STR);
+        $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
+        $stmt->execute();
+
+        $ids = array();
+        while (($orderId = $stmt->fetchColumn()) !== false) {
+            $ids[] = (int)$orderId;
+        }
+
+        return $ids;
+    }
+
+    /**
+     * @param array<int, int> $orderIds
+     * @param array<int, string> $columns
+     */
+    private function countOrderHistoryRowsForOrderIds(array $orderIds, array $columns): int
+    {
+        if (!$orderIds || !$columns) {
+            return 0;
+        }
+
+        $stmt = $this->pdo->query(
+            'SELECT COUNT(*)
+             FROM shop_order_log l
+             WHERE l.order_id IN (' . $this->intList($orderIds) . ')
+               AND (' . $this->orderHistoryTextCondition('l', $columns) . ')'
+        );
+
+        return (int)$stmt->fetchColumn();
+    }
+
+    /**
+     * @param array<int, int> $orderIds
+     * @param array<int, string> $columns
+     */
+    private function sanitizeOrderHistoryRows(array $orderIds, array $columns): void
+    {
+        if (!$orderIds || !$columns) {
+            return;
+        }
+
+        $orderList = $this->intList($orderIds);
+        foreach ($columns as $column) {
+            $safeColumn = $this->quoteIdentifier($column);
+            $stmt = $this->pdo->prepare(
+                'UPDATE shop_order_log
+                 SET ' . $safeColumn . ' = :replacement
+                 WHERE order_id IN (' . $orderList . ')
+                   AND ' . $safeColumn . ' IS NOT NULL
+                   AND ' . $safeColumn . " <> ''
+                   AND " . $safeColumn . ' <> :replacement_check'
+            );
+            $stmt->execute(array(
+                ':replacement' => self::PLACEHOLDER_HISTORY,
+                ':replacement_check' => self::PLACEHOLDER_HISTORY,
+            ));
+        }
+    }
+
+    /**
+     * @param array<int, string> $columns
+     */
+    private function hasOrderHistoryAfterCursor(string $cutoff, int $cursor, array $columns): bool
+    {
+        if (!$columns) {
+            return false;
+        }
+
+        $stmt = $this->pdo->prepare(
+            'SELECT 1
+             FROM shop_order o
+             INNER JOIN shop_order_log l ON l.order_id = o.id
+             WHERE o.create_datetime < :cutoff
+               AND o.id > :cursor
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM shop_order_params done
+                   WHERE done.order_id = o.id
+                     AND done.name = :processed_key
+                     AND done.value = :processed_value
+               )
+               AND (' . $this->orderHistoryTextCondition('l', $columns) . ')
+             LIMIT 1'
+        );
+        $stmt->execute(array(
+            ':cutoff' => $cutoff,
+            ':cursor' => $cursor,
+            ':processed_key' => self::ORDER_LOG_PROCESSED_KEY,
+            ':processed_value' => '1',
+        ));
+
+        return (bool)$stmt->fetchColumn();
+    }
+
+    /**
+     * @param array<int, string> $columns
+     */
+    private function orderHistoryTextCondition(string $alias, array $columns): string
+    {
+        $parts = array();
+        $replacement = $this->sqlString(self::PLACEHOLDER_HISTORY);
+        foreach ($columns as $column) {
+            $field = $alias . '.' . $this->quoteIdentifier($column);
+            $parts[] = '(' . $field . ' IS NOT NULL AND ' . $field . " <> '' AND " . $field . ' <> ' . $replacement . ')';
+        }
+
+        return implode(' OR ', $parts);
+    }
+
+    /**
+     * @param array<int, int> $values
+     */
+    private function intList(array $values): string
+    {
+        $ints = array();
+        foreach ($values as $value) {
+            $ints[] = (string)max(0, (int)$value);
+        }
+
+        return implode(', ', array_unique($ints));
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function runPlaceholderNormalization(string $cutoff, bool $includeOrderParams, bool $includeContacts, bool $includeOrderHistory, bool $dryRun): array
+    {
+        $result = $this->emptyNormalizationResult();
+
+        if ($includeOrderParams) {
+            $result['breakdown']['order_params'] = $this->normalizeOrderParamPlaceholders($cutoff, $dryRun);
+        }
+
+        if ($includeContacts) {
+            $result['breakdown']['contacts'] = $this->normalizeContactPlaceholders($dryRun);
+        }
+
+        if ($includeOrderHistory) {
+            $result['breakdown']['order_history'] = $this->normalizeOrderHistoryPlaceholders($cutoff, $dryRun);
+        }
+
+        $result['total'] = array_sum($result['breakdown']);
+
+        return $result;
+    }
+
+    private function normalizeOrderParamPlaceholders(string $cutoff, bool $dryRun): int
+    {
+        $expr = 'op.value';
+        $stmt = $this->pdo->prepare(
+            'SELECT COUNT(*)
+             FROM shop_order_params op
+             INNER JOIN shop_order o ON o.id = op.order_id
+             WHERE o.create_datetime < :cutoff
+               AND ' . $this->legacyPlaceholderCondition($expr)
+        );
+        $stmt->execute(array(':cutoff' => $cutoff));
+        $count = (int)$stmt->fetchColumn();
+
+        if ($count > 0 && !$dryRun) {
+            $update = $this->pdo->prepare(
+                'UPDATE shop_order_params op
+                 INNER JOIN shop_order o ON o.id = op.order_id
+                 SET op.value = ' . $this->legacyPlaceholderCaseSql($expr) . '
+                 WHERE o.create_datetime < :cutoff
+                   AND ' . $this->legacyPlaceholderCondition($expr)
+            );
+            $update->execute(array(':cutoff' => $cutoff));
+        }
+
+        return $count;
+    }
+
+    private function normalizeContactPlaceholders(bool $dryRun): int
+    {
+        $count = 0;
+
+        $contactColumns = array('name', 'firstname', 'middlename', 'lastname', 'title', 'company', 'jobtitle', 'about');
+        foreach ($contactColumns as $column) {
+            $count += $this->normalizeTableColumnPlaceholders('wa_contact', $column, $dryRun);
+        }
+
+        $count += $this->normalizeTableColumnPlaceholders('wa_contact_emails', 'email', $dryRun);
+        $count += $this->normalizeTableColumnPlaceholders('wa_contact_data', 'value', $dryRun);
+        $count += $this->normalizeTableColumnPlaceholders('wa_contact_data_text', 'value', $dryRun);
+
+        $addressColumns = array(
+            'name',
+            'firstname',
+            'middlename',
+            'lastname',
+            'company',
+            'street',
+            'house',
+            'flat',
+            'zip',
+            'city',
+            'region',
+            'country',
+            'address',
+            'phone',
+            'comment',
+            'value',
+            'data',
+        );
+        foreach ($addressColumns as $column) {
+            $count += $this->normalizeTableColumnPlaceholders('wa_contact_addresses', $column, $dryRun);
+        }
+
+        return $count;
+    }
+
+    private function normalizeOrderHistoryPlaceholders(string $cutoff, bool $dryRun): int
+    {
+        $columns = $this->getOrderHistoryTextColumns();
+        if (!$columns) {
+            return 0;
+        }
+
+        $count = 0;
+        foreach ($columns as $column) {
+            $field = 'l.' . $this->quoteIdentifier($column);
+            $stmt = $this->pdo->prepare(
+                'SELECT COUNT(*)
+                 FROM shop_order_log l
+                 INNER JOIN shop_order o ON o.id = l.order_id
+                 WHERE o.create_datetime < :cutoff
+                   AND ' . $this->legacyPlaceholderCondition($field)
+            );
+            $stmt->execute(array(':cutoff' => $cutoff));
+            $columnCount = (int)$stmt->fetchColumn();
+            $count += $columnCount;
+
+            if ($columnCount > 0 && !$dryRun) {
+                $update = $this->pdo->prepare(
+                    'UPDATE shop_order_log l
+                     INNER JOIN shop_order o ON o.id = l.order_id
+                     SET l.' . $this->quoteIdentifier($column) . ' = ' . $this->legacyPlaceholderCaseSql($field) . '
+                     WHERE o.create_datetime < :cutoff
+                       AND ' . $this->legacyPlaceholderCondition($field)
+                );
+                $update->execute(array(':cutoff' => $cutoff));
+            }
+        }
+
+        return $count;
+    }
+
+    private function normalizeTableColumnPlaceholders(string $table, string $column, bool $dryRun): int
+    {
+        if (!$this->tableExists($table) || !$this->tableHasColumn($table, $column)) {
+            return 0;
+        }
+
+        $field = $this->quoteIdentifier($column);
+        $stmt = $this->pdo->query(
+            'SELECT COUNT(*)
+             FROM ' . $this->quoteIdentifier($table) . '
+             WHERE ' . $this->legacyPlaceholderCondition($field)
+        );
+        $count = (int)$stmt->fetchColumn();
+
+        if ($count > 0 && !$dryRun) {
+            $this->pdo->exec(
+                'UPDATE ' . $this->quoteIdentifier($table) . '
+                 SET ' . $field . ' = ' . $this->legacyPlaceholderCaseSql($field) . '
+                 WHERE ' . $this->legacyPlaceholderCondition($field)
+            );
+        }
+
+        return $count;
+    }
+
+    private function legacyPlaceholderCondition(string $expr): string
+    {
+        return '(' . $expr . ' = ' . $this->sqlString('Deleted') .
+            ' OR (LEFT(' . $expr . ', 13) = ' . $this->sqlString('anon+contact_') . ' AND RIGHT(' . $expr . ', 16) = ' . $this->sqlString('@example.invalid') . ')' .
+            ' OR (LEFT(' . $expr . ', 11) = ' . $this->sqlString('anon+order_') . ' AND RIGHT(' . $expr . ', 16) = ' . $this->sqlString('@example.invalid') . ')' .
+            ' OR ' . $expr . ' LIKE ' . $this->sqlString('anon-contact-%') .
+            ' OR ' . $expr . ' LIKE ' . $this->sqlString('anon-order-%') . ')';
+    }
+
+    private function legacyPlaceholderCaseSql(string $expr): string
+    {
+        return 'CASE
+            WHEN ' . $expr . ' = ' . $this->sqlString('Deleted') . ' THEN ' . $this->sqlString(self::PLACEHOLDER_NAME) . '
+            WHEN (LEFT(' . $expr . ', 13) = ' . $this->sqlString('anon+contact_') . ' AND RIGHT(' . $expr . ', 16) = ' . $this->sqlString('@example.invalid') . ')
+              OR (LEFT(' . $expr . ', 11) = ' . $this->sqlString('anon+order_') . ' AND RIGHT(' . $expr . ', 16) = ' . $this->sqlString('@example.invalid') . ')
+                THEN REPLACE(REPLACE(' . $expr . ', ' . $this->sqlString('anon+') . ', ' . $this->sqlString('obezlicheno+') . '), ' . $this->sqlString('@example.invalid') . ', ' . $this->sqlString('@' . self::PLACEHOLDER_EMAIL_DOMAIN) . ')
+            WHEN ' . $expr . ' LIKE ' . $this->sqlString('anon-contact-%') . '
+                THEN REPLACE(' . $expr . ', ' . $this->sqlString('anon-contact-') . ', ' . $this->sqlString('obezlicheno-contact-') . ')
+            WHEN ' . $expr . ' LIKE ' . $this->sqlString('anon-order-%') . '
+                THEN REPLACE(' . $expr . ', ' . $this->sqlString('anon-order-') . ', ' . $this->sqlString('obezlicheno-order-') . ')
+            ELSE ' . $expr . '
+        END';
+    }
+
+    private function sqlString(string $value): string
+    {
+        return (string)$this->pdo->quote($value);
     }
 
     private function cutoff(int $days): string
@@ -1547,21 +2158,33 @@ final class StandaloneDepersonalizer
 
     private function tableHasColumn(string $table, string $column): bool
     {
+        return array_key_exists($column, $this->tableColumnTypes($table));
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    private function tableColumnTypes(string $table): array
+    {
         if (!$this->tableExists($table)) {
-            return false;
+            return array();
         }
 
-        if (!array_key_exists($table, $this->tableColumnsCache)) {
+        if (!array_key_exists($table, $this->tableColumnTypesCache)) {
             $safeTable = $this->quoteIdentifier($table);
             $stmt = $this->pdo->query('SHOW COLUMNS FROM ' . $safeTable);
             $columns = array();
+            $types = array();
             while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
-                $columns[] = (string)$row['Field'];
+                $field = (string)$row['Field'];
+                $columns[] = $field;
+                $types[$field] = (string)$row['Type'];
             }
             $this->tableColumnsCache[$table] = $columns;
+            $this->tableColumnTypesCache[$table] = $types;
         }
 
-        return in_array($column, $this->tableColumnsCache[$table], true);
+        return $this->tableColumnTypesCache[$table];
     }
 
     private function quoteIdentifier(string $identifier): string

@@ -408,10 +408,12 @@ if ($requestMethod === 'POST') {
             'days' => readPostInt('days', 365),
             'limit' => readPostInt('limit', 200),
             'cursor' => readPostInt('cursor', 0),
+            'history_cursor' => readPostInt('history_cursor', 0),
             'keep_geo' => readPostBool('keep_geo'),
             'wipe_comments' => readPostBool('wipe_comments'),
             'anonymize_contacts' => readPostBool('anonymize_contacts'),
             'contact_catchup_only' => readPostBool('contact_catchup_only'),
+            'anonymize_order_history' => readPostBool('anonymize_order_history'),
             'dry_run' => readPostBool('dry_run'),
             'backup_confirmed' => readPostBool('backup_confirmed'),
             'confirmation_phrase' => (string)($_POST['confirmation_phrase'] ?? ''),
@@ -834,6 +836,7 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
                     <label tabindex="0" data-tooltip="Очищает выбранные поля комментариев. Включайте только если в комментариях могут быть персональные данные."><input type="checkbox" name="wipe_comments" value="1"> Стереть комментарии заказов</label>
                     <label tabindex="0" data-tooltip="Дополнительно обезличивает карточки контактов, у которых нет заказов новее выбранного срока хранения. Более рискованный режим, чем обработка только заказов."><input type="checkbox" name="anonymize_contacts" value="1" <?php echo empty($optionalTables['wa_contact']) || empty($optionalTables['state_table_ready']) ? 'disabled' : ''; ?>> Обезличить контакты без новых заказов</label>
                     <label tabindex="0" data-tooltip="Обрабатывает контакты по старым заказам даже если сами заказы уже были обезличены и помечены как обработанные. Заказы при этом не меняются."><input type="checkbox" name="contact_catchup_only" value="1" <?php echo empty($optionalTables['wa_contact']) ? 'disabled' : ''; ?>> Только контакты по уже обработанным старым заказам</label>
+                    <label tabindex="0" data-tooltip="Очищает текстовые записи истории заказа, где могут оставаться имена, ФИО, номера отправлений, комментарии и другие персональные данные. Даты, статусы и структура заказа не удаляются."><input type="checkbox" name="anonymize_order_history" value="1"> Обезличить историю выполнения заказов</label>
                     <label tabindex="0" data-tooltip="Показывает, что было бы обработано, но не записывает изменения в базу. Рекомендуется всегда сначала запускать этот режим."><input type="checkbox" name="dry_run" value="1" checked> Пробный запуск без записи</label>
                 </div>
 
@@ -926,6 +929,7 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
             wipe_comments: fd.get('wipe_comments') ? '1' : '0',
             anonymize_contacts: fd.get('anonymize_contacts') ? '1' : '0',
             contact_catchup_only: fd.get('contact_catchup_only') ? '1' : '0',
+            anonymize_order_history: fd.get('anonymize_order_history') ? '1' : '0',
             dry_run: fd.get('dry_run') ? '1' : '0',
             backup_confirmed: fd.get('backup_confirmed') ? '1' : '0',
             confirmation_phrase: fd.get('confirmation_phrase') || '',
@@ -1086,10 +1090,22 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
 
             previewBlock.style.display = 'block';
             const contactCatchup = result.contact_catchup || {};
+            const orderHistory = result.order_history || {};
+            const normalization = result.placeholder_normalization || {};
             const previewLines = [
                 'Старых заказов всего (' + result.cutoff + '): ' + (result.old_orders_total || result.total_orders || 0),
                 'Заказов к обработке сейчас: ' + result.total_orders
             ];
+
+            if (orderHistory.available) {
+                previewLines.push('Записей истории заказов к обезличиванию: ' + (orderHistory.rows_to_process || 0));
+                previewLines.push('Заказов с уже обработанной историей: ' + (orderHistory.already_marked_orders || 0));
+                previewLines.push('Колонки истории заказов: ' + (orderHistory.columns || []).join(', '));
+            } else if (orderHistory.note) {
+                previewLines.push(orderHistory.note);
+            }
+
+            previewLines.push('Старых плейсхолдеров к нормализации: ' + (normalization.total || 0));
 
             if (contactCatchup.available) {
                 previewLines.push('Контактов для догоняющей обработки: ' + (contactCatchup.eligible_contacts || 0));
@@ -1103,7 +1119,7 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
             previewInfo.textContent = previewLines.join('\n');
             previewInfo.className = 'status ok';
             renderKeys(result.candidate_keys || []);
-            appendLog('Предпросмотр завершен. Заказов к обработке: ' + result.total_orders + ', контактов для догоняющей обработки: ' + (contactCatchup.eligible_contacts || 0) + '.');
+            appendLog('Предпросмотр завершен. Заказов к обработке: ' + result.total_orders + ', строк истории: ' + (orderHistory.rows_to_process || 0) + ', старых плейсхолдеров: ' + (normalization.total || 0) + ', контактов для догоняющей обработки: ' + (contactCatchup.eligible_contacts || 0) + '.');
         } catch (error) {
             previewInfo.textContent = String(error.message || error);
             previewInfo.className = 'status err';
@@ -1125,6 +1141,7 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
         progressText.className = 'status';
 
         let cursor = 0;
+        let historyCursor = 0;
         const runId = generateRunId();
 
         try {
@@ -1132,6 +1149,9 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
             validateRealRun(initialState);
             const runIsDryRun = initialState.dry_run === '1';
             const storedConfirmationPhrase = initialState.confirmation_phrase;
+            if (runIsDryRun && initialState.anonymize_order_history === '1') {
+                appendLog('Обработка истории заказов запущена в dry-run: записи не будут изменены.');
+            }
             if (!runIsDryRun) {
                 const confirmationInput = form.querySelector('input[name="confirmation_phrase"]');
                 if (confirmationInput) {
@@ -1148,6 +1168,7 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
                 state.backup_confirmed = initialState.backup_confirmed;
                 state.confirmation_phrase = runIsDryRun ? state.confirmation_phrase : storedConfirmationPhrase;
                 state.contact_catchup_only = initialState.contact_catchup_only;
+                state.anonymize_order_history = initialState.anonymize_order_history;
                 validateRealRun(state);
 
                 const payload = {
@@ -1156,10 +1177,12 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
                     days: state.days,
                     limit: state.limit,
                     cursor: String(cursor),
+                    history_cursor: String(historyCursor),
                     keep_geo: state.keep_geo,
                     wipe_comments: state.wipe_comments,
                     anonymize_contacts: state.anonymize_contacts,
                     contact_catchup_only: state.contact_catchup_only,
+                    anonymize_order_history: state.anonymize_order_history,
                     dry_run: state.dry_run,
                     backup_confirmed: state.backup_confirmed,
                     confirmation_phrase: state.confirmation_phrase,
@@ -1170,6 +1193,7 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
                 const data = await postAction(payload);
 
                 cursor = Number(data.cursor || cursor);
+                historyCursor = Number(data.history_cursor || historyCursor);
                 updateProgress(Number(data.progress || 0), Number(data.total || 0), Boolean(data.done));
 
                 appendLog(
@@ -1177,7 +1201,10 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
                     ', пропущено заказов=' + Object.keys(data.skipped_orders || {}).length +
                     ', обработано контактов=' + (data.processed_contacts || []).length +
                     ', пропущено контактов=' + Object.keys(data.skipped_contacts || {}).length +
+                    ', строк истории обработано=' + (data.processed_history_rows || 0) +
+                    ', старых плейсхолдеров нормализовано=' + (data.normalized_placeholders || 0) +
                     ', cursor=' + (data.cursor || 0) +
+                    ', history_cursor=' + (data.history_cursor || 0) +
                     ', dry_run=' + (data.dry_run ? 'да' : 'нет') +
                     ', run_id=' + (data.run_id || 'n/a') +
                     ', log=' + (data.batch_log || 'n/a')
