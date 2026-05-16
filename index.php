@@ -1,6 +1,8 @@
 <?php
 declare(strict_types=1);
 
+const DEPLOYED_VERSION = '0.6.0-history-diagnostics';
+
 function depersonalizerSessionCookiePath(): string
 {
     $scriptName = (string)($_SERVER['SCRIPT_NAME'] ?? '');
@@ -401,6 +403,7 @@ if ($requestMethod === 'POST') {
         if ($action === 'preview') {
             $days = readPostInt('days', 365);
             $preview = $service->preview($days);
+            $preview['tool_version'] = DEPLOYED_VERSION;
             jsonResponse(array('ok' => true, 'data' => $preview));
         }
 
@@ -409,10 +412,12 @@ if ($requestMethod === 'POST') {
             'limit' => readPostInt('limit', 200),
             'cursor' => readPostInt('cursor', 0),
             'history_cursor' => readPostInt('history_cursor', 0),
+            'contact_cursor' => readPostInt('contact_cursor', 0),
             'keep_geo' => readPostBool('keep_geo'),
             'wipe_comments' => readPostBool('wipe_comments'),
             'anonymize_contacts' => readPostBool('anonymize_contacts'),
             'contact_catchup_only' => readPostBool('contact_catchup_only'),
+            'contact_order_scope' => (string)($_POST['contact_order_scope'] ?? 'processed'),
             'anonymize_order_history' => readPostBool('anonymize_order_history'),
             'dry_run' => readPostBool('dry_run'),
             'backup_confirmed' => readPostBool('backup_confirmed'),
@@ -439,6 +444,7 @@ if ($requestMethod === 'POST') {
         }
 
         $result = $service->runBatch($options);
+        $result['tool_version'] = DEPLOYED_VERSION;
         jsonResponse(array('ok' => true, 'data' => $result));
     } catch (Throwable $error) {
         jsonResponse(array('ok' => false, 'error' => $error->getMessage()), 500);
@@ -600,6 +606,31 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
             font-size: 14px;
         }
 
+        .radio-row {
+            display: grid;
+            gap: 8px;
+            margin: 10px 0 0;
+            padding: 10px 12px;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            background: #fbfcff;
+        }
+
+        .radio-row label {
+            display: inline-flex;
+            gap: 8px;
+            align-items: center;
+            margin: 0;
+            color: var(--text);
+            font-size: 14px;
+        }
+
+        .hint {
+            margin-top: 6px;
+            color: var(--muted);
+            font-size: 13px;
+        }
+
         .protection {
             margin-top: 12px;
             padding-top: 12px;
@@ -747,6 +778,7 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
             <div style="margin-top: 6px;"><strong>БД:</strong> <code><?php echo htmlspecialchars((string)$dbConfig['database'], ENT_QUOTES, 'UTF-8'); ?></code></div>
             <div style="margin-top: 6px;"><strong>MySQL:</strong> <code><?php echo htmlspecialchars($mysqlVersion, ENT_QUOTES, 'UTF-8'); ?></code></div>
             <div style="margin-top: 6px;"><strong>PHP:</strong> <code><?php echo htmlspecialchars(PHP_VERSION, ENT_QUOTES, 'UTF-8'); ?></code></div>
+            <div style="margin-top: 6px;"><strong>Версия инструмента:</strong> <code><?php echo htmlspecialchars(DEPLOYED_VERSION, ENT_QUOTES, 'UTF-8'); ?></code></div>
             <div style="margin-top: 6px;"><strong>Схема:</strong> <code><?php echo $pageReady ? 'совместима' : 'не готова'; ?></code></div>
             <form method="post" style="margin-top: 10px;">
                 <input type="hidden" name="action" value="logout">
@@ -820,6 +852,7 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
                     <div>
                         <label for="days">Срок хранения, дней</label>
                         <input id="days" name="days" type="number" value="365" min="1" max="36500">
+                        <div id="cutoffClientText" class="hint">Дата отсечения рассчитывается в браузере.</div>
                     </div>
                     <div>
                         <label for="limit">Размер пакета</label>
@@ -835,9 +868,16 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
                     <label tabindex="0" data-tooltip="Перед очисткой адресных полей сохраняет грубую географию в geo_city, geo_region, geo_country, geo_lat и geo_lng. Существующие непустые geo_* не перезаписываются."><input type="checkbox" name="keep_geo" value="1" checked> Сохранить гео-снимок в <code>geo_*</code></label>
                     <label tabindex="0" data-tooltip="Очищает выбранные поля комментариев. Включайте только если в комментариях могут быть персональные данные."><input type="checkbox" name="wipe_comments" value="1"> Стереть комментарии заказов</label>
                     <label tabindex="0" data-tooltip="Дополнительно обезличивает карточки контактов, у которых нет заказов новее выбранного срока хранения. Более рискованный режим, чем обработка только заказов."><input type="checkbox" name="anonymize_contacts" value="1" <?php echo empty($optionalTables['wa_contact']) || empty($optionalTables['state_table_ready']) ? 'disabled' : ''; ?>> Обезличить контакты без новых заказов</label>
-                    <label tabindex="0" data-tooltip="Обрабатывает контакты по старым заказам даже если сами заказы уже были обезличены и помечены как обработанные. Заказы при этом не меняются."><input type="checkbox" name="contact_catchup_only" value="1" <?php echo empty($optionalTables['wa_contact']) ? 'disabled' : ''; ?>> Только контакты по уже обработанным старым заказам</label>
                     <label tabindex="0" data-tooltip="Очищает текстовые записи истории заказа, где могут оставаться имена, ФИО, номера отправлений, комментарии и другие персональные данные. Даты, статусы и структура заказа не удаляются."><input type="checkbox" name="anonymize_order_history" value="1"> Обезличить историю выполнения заказов</label>
                     <label tabindex="0" data-tooltip="Показывает, что было бы обработано, но не записывает изменения в базу. Рекомендуется всегда сначала запускать этот режим."><input type="checkbox" name="dry_run" value="1" checked> Пробный запуск без записи</label>
+                </div>
+
+                <div class="radio-row" data-tooltip="Выберите, из каких старых заказов брать контакты. Контакты всё равно пропускаются, если у них есть новые заказы, логин или признаки сотрудника.">
+                    <strong>Источник контактов</strong>
+                    <label><input type="radio" name="contact_order_scope" value="processed" checked> Контакты по уже обработанным старым заказам</label>
+                    <label><input type="radio" name="contact_order_scope" value="unprocessed"> Контакты по ещё не обработанным старым заказам</label>
+                    <label><input type="radio" name="contact_order_scope" value="all"> Контакты по всем старым заказам</label>
+                    <div class="hint">При выборе уже обработанных заказов запускается только обработка контактов; сами заказы не меняются.</div>
                 </div>
 
                 <div class="protection">
@@ -885,6 +925,8 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
     const previewBlock = document.getElementById('previewBlock');
     const previewInfo = document.getElementById('previewInfo');
     const keysList = document.getElementById('keysList');
+    const daysInput = document.getElementById('days');
+    const cutoffClientText = document.getElementById('cutoffClientText');
 
     const progressBar = document.getElementById('progressBar');
     const progressText = document.getElementById('progressText');
@@ -892,6 +934,7 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
     const canRunReal = <?php echo !empty($environment['can_run_real']) ? 'true' : 'false'; ?>;
 
     let stopRequested = false;
+    let runOrderIdentifiers = [];
 
     function generateRunId() {
         const bytes = new Uint8Array(8);
@@ -919,8 +962,66 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
         logNode.scrollTop = logNode.scrollHeight;
     }
 
+    function formatLocalDate(value) {
+        const pad = (num) => String(num).padStart(2, '0');
+        return pad(value.getDate()) + '.' +
+            pad(value.getMonth() + 1) + '.' +
+            value.getFullYear() + ' ' +
+            pad(value.getHours()) + ':' +
+            pad(value.getMinutes());
+    }
+
+    function updateClientCutoff() {
+        const days = Math.max(1, Number(daysInput.value || 365));
+        const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+        cutoffClientText.textContent = 'Будут рассматриваться заказы до ' + formatLocalDate(cutoff) + ' (по времени браузера).';
+    }
+
+    function compactOrderIdentifiers(values, maxRanges = 20) {
+        const unique = Array.from(new Set((values || []).map((value) => String(value || '').trim()).filter(Boolean)));
+        if (!unique.length) {
+            return '';
+        }
+
+        const numbers = [];
+        for (const value of unique) {
+            const match = value.match(/^#(\d+)$/);
+            if (!match) {
+                const list = unique.slice(0, maxRanges);
+                if (unique.length > maxRanges) {
+                    list.push('... и ещё ' + (unique.length - maxRanges));
+                }
+                return list.join(', ');
+            }
+            numbers.push(Number(match[1]));
+        }
+
+        numbers.sort((a, b) => a - b);
+        const ranges = [];
+        let start = numbers[0];
+        let prev = numbers[0];
+        for (let i = 1; i < numbers.length; i += 1) {
+            const current = numbers[i];
+            if (current === prev + 1) {
+                prev = current;
+                continue;
+            }
+            ranges.push(start === prev ? '#' + start : '#' + start + '-#' + prev);
+            start = current;
+            prev = current;
+        }
+        ranges.push(start === prev ? '#' + start : '#' + start + '-#' + prev);
+
+        const shown = ranges.slice(0, maxRanges);
+        if (ranges.length > maxRanges) {
+            shown.push('... и ещё ' + (ranges.length - maxRanges));
+        }
+        return shown.join(', ');
+    }
+
     function collectFormState() {
         const fd = new FormData(form);
+        const contactOrderScope = fd.get('contact_order_scope') || 'processed';
         const out = {
             csrf_token: fd.get('csrf_token') || '',
             days: fd.get('days') || '365',
@@ -928,7 +1029,8 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
             keep_geo: fd.get('keep_geo') ? '1' : '0',
             wipe_comments: fd.get('wipe_comments') ? '1' : '0',
             anonymize_contacts: fd.get('anonymize_contacts') ? '1' : '0',
-            contact_catchup_only: fd.get('contact_catchup_only') ? '1' : '0',
+            contact_catchup_only: fd.get('anonymize_contacts') && contactOrderScope === 'processed' ? '1' : '0',
+            contact_order_scope: contactOrderScope,
             anonymize_order_history: fd.get('anonymize_order_history') ? '1' : '0',
             dry_run: fd.get('dry_run') ? '1' : '0',
             backup_confirmed: fd.get('backup_confirmed') ? '1' : '0',
@@ -1092,23 +1194,36 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
             const contactCatchup = result.contact_catchup || {};
             const orderHistory = result.order_history || {};
             const normalization = result.placeholder_normalization || {};
+            const contactScopes = contactCatchup.scopes || {};
             const previewLines = [
-                'Старых заказов всего (' + result.cutoff + '): ' + (result.old_orders_total || result.total_orders || 0),
-                'Заказов к обработке сейчас: ' + result.total_orders
+                'Дата отсечения по серверу: ' + result.cutoff,
+                'Старых заказов всего: ' + (result.old_orders_total || result.total_orders || 0),
+                'Заказов к обработке сейчас: ' + result.total_orders,
+                'Поврежденных служебных полей payment_name/shipping_name: ' + (result.damaged_service_fields || 0)
             ];
 
-            if (orderHistory.available) {
+            previewLines.push('История заказов: таблица shop_order_log ' + (orderHistory.exists ? 'есть' : 'отсутствует'));
+            if (orderHistory.exists) {
+                previewLines.push('Колонки shop_order_log: ' + (orderHistory.all_columns || []).join(', '));
+                previewLines.push('Безопасные текстовые колонки: ' + ((orderHistory.safe_text_columns || []).join(', ') || 'нет'));
+                previewLines.push('Строк истории старых заказов: ' + (orderHistory.old_order_log_rows || 0));
+                previewLines.push('Строк с безопасным текстом: ' + (orderHistory.rows_with_safe_text || 0));
                 previewLines.push('Записей истории заказов к обезличиванию: ' + (orderHistory.rows_to_process || 0));
                 previewLines.push('Заказов с уже обработанной историей: ' + (orderHistory.already_marked_orders || 0));
-                previewLines.push('Колонки истории заказов: ' + (orderHistory.columns || []).join(', '));
+                previewLines.push('Имена администраторов/операторов в actor/name-колонках сохраняются по умолчанию.');
+                if (orderHistory.note) {
+                    previewLines.push(orderHistory.note);
+                }
             } else if (orderHistory.note) {
                 previewLines.push(orderHistory.note);
             }
 
-            previewLines.push('Старых плейсхолдеров к нормализации: ' + (normalization.total || 0));
+            previewLines.push('Старых плейсхолдеров к нормализации: ' + (normalization.total || 0) + ' (параметры заказов: ' + ((normalization.breakdown || {}).order_params || 0) + ', контакты: ' + ((normalization.breakdown || {}).contacts || 0) + ', история: ' + ((normalization.breakdown || {}).order_history || 0) + ')');
 
             if (contactCatchup.available) {
-                previewLines.push('Контактов для догоняющей обработки: ' + (contactCatchup.eligible_contacts || 0));
+                previewLines.push('Контактов по уже обработанным старым заказам: ' + (((contactScopes.processed || {}).eligible_contacts) || 0));
+                previewLines.push('Контактов по ещё не обработанным старым заказам: ' + (((contactScopes.unprocessed || {}).eligible_contacts) || 0));
+                previewLines.push('Контактов по всем старым заказам: ' + (((contactScopes.all || {}).eligible_contacts) || 0));
                 previewLines.push('Контактов уже помечено обработанными: ' + (contactCatchup.already_processed_contacts || 0));
                 previewLines.push('Контактов с более новыми заказами: ' + (contactCatchup.contacts_with_newer_orders || 0));
                 previewLines.push('Защищенных контактов будет пропущено: ' + (contactCatchup.protected_contacts || 0));
@@ -1119,7 +1234,7 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
             previewInfo.textContent = previewLines.join('\n');
             previewInfo.className = 'status ok';
             renderKeys(result.candidate_keys || []);
-            appendLog('Предпросмотр завершен. Заказов к обработке: ' + result.total_orders + ', строк истории: ' + (orderHistory.rows_to_process || 0) + ', старых плейсхолдеров: ' + (normalization.total || 0) + ', контактов для догоняющей обработки: ' + (contactCatchup.eligible_contacts || 0) + '.');
+            appendLog('Предпросмотр завершен. Заказов к обработке: ' + result.total_orders + ', строк истории: ' + (orderHistory.rows_to_process || 0) + ', поврежденных payment_name/shipping_name: ' + (result.damaged_service_fields || 0) + ', старых плейсхолдеров: ' + (normalization.total || 0) + ', контактов по всем старым заказам: ' + (((contactScopes.all || {}).eligible_contacts) || 0) + '.');
         } catch (error) {
             previewInfo.textContent = String(error.message || error);
             previewInfo.className = 'status err';
@@ -1142,6 +1257,8 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
 
         let cursor = 0;
         let historyCursor = 0;
+        let contactCursor = 0;
+        runOrderIdentifiers = [];
         const runId = generateRunId();
 
         try {
@@ -1168,6 +1285,7 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
                 state.backup_confirmed = initialState.backup_confirmed;
                 state.confirmation_phrase = runIsDryRun ? state.confirmation_phrase : storedConfirmationPhrase;
                 state.contact_catchup_only = initialState.contact_catchup_only;
+                state.contact_order_scope = initialState.contact_order_scope;
                 state.anonymize_order_history = initialState.anonymize_order_history;
                 validateRealRun(state);
 
@@ -1178,10 +1296,12 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
                     limit: state.limit,
                     cursor: String(cursor),
                     history_cursor: String(historyCursor),
+                    contact_cursor: String(contactCursor),
                     keep_geo: state.keep_geo,
                     wipe_comments: state.wipe_comments,
                     anonymize_contacts: state.anonymize_contacts,
                     contact_catchup_only: state.contact_catchup_only,
+                    contact_order_scope: state.contact_order_scope,
                     anonymize_order_history: state.anonymize_order_history,
                     dry_run: state.dry_run,
                     backup_confirmed: state.backup_confirmed,
@@ -1194,7 +1314,16 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
 
                 cursor = Number(data.cursor || cursor);
                 historyCursor = Number(data.history_cursor || historyCursor);
+                contactCursor = Number(data.contact_cursor || contactCursor);
+                if (Array.isArray(data.processed_order_numbers)) {
+                    runOrderIdentifiers = runOrderIdentifiers.concat(data.processed_order_numbers);
+                }
                 updateProgress(Number(data.progress || 0), Number(data.total || 0), Boolean(data.done));
+
+                const batchOrderSummary = data.processed_order_numbers_summary || compactOrderIdentifiers(data.processed_order_numbers || []);
+                if (batchOrderSummary !== '') {
+                    appendLog('Обработаны заказы: ' + batchOrderSummary);
+                }
 
                 appendLog(
                     'Пакет: обработано заказов=' + (data.processed_orders || []).length +
@@ -1205,6 +1334,7 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
                     ', старых плейсхолдеров нормализовано=' + (data.normalized_placeholders || 0) +
                     ', cursor=' + (data.cursor || 0) +
                     ', history_cursor=' + (data.history_cursor || 0) +
+                    ', contact_cursor=' + (data.contact_cursor || 0) +
                     ', dry_run=' + (data.dry_run ? 'да' : 'нет') +
                     ', run_id=' + (data.run_id || 'n/a') +
                     ', log=' + (data.batch_log || 'n/a')
@@ -1217,7 +1347,9 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
                 }
 
                 if (data.done) {
+                    const finalOrderSummary = compactOrderIdentifiers(runOrderIdentifiers);
                     appendLog('Запуск завершен на cursor=' + cursor + '.');
+                    appendLog('Всего обработано заказов: ' + runOrderIdentifiers.length + '. Номера: ' + (finalOrderSummary || 'нет обработанных заказов') + '.');
                     break;
                 }
             }
@@ -1231,6 +1363,8 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
     });
 
     setupTooltips();
+    daysInput.addEventListener('input', updateClientCutoff);
+    updateClientCutoff();
 })();
 </script>
 <?php endif; ?>
