@@ -1925,7 +1925,7 @@ final class StandaloneDepersonalizer
              FROM shop_order_params op
              INNER JOIN shop_order o ON o.id = op.order_id
              WHERE o.create_datetime < :cutoff
-               AND op.name NOT IN ('payment_name', 'shipping_name')
+               AND op.name NOT IN (' . $this->sqlString('payment_name') . ', ' . $this->sqlString('shipping_name') . ')
                AND ' . $this->legacyPlaceholderCondition($expr)
         );
         $stmt->execute(array(':cutoff' => $cutoff));
@@ -1937,7 +1937,7 @@ final class StandaloneDepersonalizer
                  INNER JOIN shop_order o ON o.id = op.order_id
                  SET op.value = ' . $this->legacyPlaceholderCaseSql($expr) . '
                  WHERE o.create_datetime < :cutoff
-                   AND op.name NOT IN ('payment_name', 'shipping_name')
+                   AND op.name NOT IN (' . $this->sqlString('payment_name') . ', ' . $this->sqlString('shipping_name') . ')
                    AND ' . $this->legacyPlaceholderCondition($expr)
             );
             $update->execute(array(':cutoff' => $cutoff));
