@@ -1,12 +1,17 @@
-﻿<?php
+<?php
 return array(
-    // Optional static credentials. If this file is absent, index.php tries wa-config/db.php automatically.
     'driver'   => 'mysql',
-    'host'     => '127.0.0.1',
+    'host'     => 'localhost',
     'port'     => 3306,
-    'database' => 'webasyst',
-    'user'     => 'db_user',
-    'password' => 'db_password',
+    'database' => 'dtalke_test_shop',
+    'user'     => 'dtalke_test_shop',
+    'password' => 'REPLACE_WITH_REAL_PASSWORD',
     'charset'  => 'utf8mb4',
-    // 'socket' => '/var/run/mysqld/mysqld.sock',
+    'socket'   => '',
+
+    // Обязательный токен доступа к странице. Используйте длинное случайное значение и не добавляйте этот файл в git.
+    'access_token' => 'REPLACE_WITH_LONG_RANDOM_ACCESS_TOKEN',
+
+    // Для теста оставьте false. Включайте true только если намеренно разрешаете реальные запуски на PROD-похожей БД.
+    'allow_prod' => false,
 );

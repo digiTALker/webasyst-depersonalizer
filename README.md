@@ -1,49 +1,269 @@
-﻿# Webasyst Depersonalizer (Standalone)
+# Обезличивание Webasyst (standalone)
 
-This repository now provides a **standalone PHP page** for depersonalizing old Webasyst Shop-Script data.
+Этот репозиторий содержит отдельную PHP-страницу для обезличивания старых персональных данных Webasyst/Shop-Script напрямую в MySQL.
 
-No plugin installation is required. Upload this folder to your server, open `index.php`, and run the process from the page.
+Это не Webasyst-плагин. Не устанавливайте инструмент через Webasyst Installer, hooks, регистрацию плагина или backend routing. Старый код плагина оставлен только в `legacy-plugin/` для справки.
 
-## Why this version
+## Развертывание
 
-The old plugin-oriented implementation had architecture and encoding inconsistencies (mixed UI/CLI states, duplicated logic, broken RU text encoding in files). The project is now unified around one standalone service.
+Пример пути на Beget:
 
-## Files
+```text
+/home/d/dtalke/shop.incyber.ru/public_html/test/tools/depersonalizer/
+```
 
-- `index.php` - web page and API endpoints (`preview` + batch `run`)
-- `src/StandaloneConfigLoader.php` - DB config loader (auto from `wa-config/db.php` or local override)
-- `src/StandaloneDepersonalizer.php` - depersonalization engine
-- `config.local.php.example` - local DB config template
-- `logs/` - runtime and batch logs (created automatically)
+Пример URL:
 
-## Deployment
+```text
+https://shop.incyber.ru/test/tools/depersonalizer/index.php
+```
 
-1. Upload the folder to your server (for example: `/var/www/site/tools/depersonalizer/`).
-2. Open `index.php` in browser.
-3. If auto-detection fails, create `config.local.php` from `config.local.php.example`.
-4. Run **Preview** first, then execute batches.
+Сначала используйте тестовую базу:
 
-## Safety model (conflict-averse with Webasyst core)
+```text
+dtalke_test_shop
+```
 
-This tool is intentionally conservative:
+В верхнем блоке страницы показывается версия сборки инструмента. Для этой версии ожидаемая строка:
 
-- No schema migrations or table structure changes.
-- No deletions from core order/contact tables.
-- Updates run in DB transactions batch-by-batch.
-- Processed rows are marked via namespaced keys:
-  - `shop_order_params._depersonalizer_ext_processed`
-  - `wa_contact_params._depersonalizer_ext_processed`
-- Existing IDs and table relations are preserved.
+```text
+0.6.0-history-diagnostics
+```
 
-## Notes
+## Локальная конфигурация
 
-- Always take a DB backup before first real run.
-- Keep `dry-run` enabled until preview results look correct.
-- Contact anonymization is optional and only affects contacts without newer orders.
-- Restrict access to this page (IP allowlist or basic auth) before production use.
+Создайте `config.local.php` из `config.local.php.example`. Не добавляйте `config.local.php` в git.
 
-## Legacy plugin files
+```php
+<?php
+return array(
+    'driver'   => 'mysql',
+    'host'     => 'localhost',
+    'port'     => 3306,
+    'database' => 'dtalke_test_shop',
+    'user'     => 'dtalke_test_shop',
+    'password' => 'REPLACE_WITH_REAL_PASSWORD',
+    'charset'  => 'utf8mb4',
+    'socket'   => '',
 
-Old plugin files are moved to `legacy-plugin/` for reference, but the current supported workflow is the standalone page.
+    'access_token' => 'REPLACE_WITH_LONG_RANDOM_ACCESS_TOKEN',
+    'allow_prod' => false,
+);
+```
 
+Загрузчик также понимает вложенный формат `db` и Webasyst `wa-config/db.php`, но внутри нормализует настройки в плоский формат.
 
+## Beget / PHP
+
+Веб-сервер для этой папки может работать на PHP 8.1, а стандартная CLI-команда `php` на Beget может быть PHP 5.6. Для проверки синтаксиса используйте явный PHP 8.1:
+
+```bash
+cd /home/d/dtalke/shop.incyber.ru/public_html/test/tools/depersonalizer
+/usr/local/php-cgi/8.1/bin/php -l index.php
+/usr/local/php-cgi/8.1/bin/php -l src/StandaloneConfigLoader.php
+/usr/local/php-cgi/8.1/bin/php -l src/StandaloneDepersonalizer.php
+```
+
+SQL остается совместимым с MySQL 5.7. Не добавляйте CTE, window functions, `JSON_TABLE`, `REGEXP_REPLACE` и MySQL 8-only collations.
+
+## Безопасность
+
+- Закройте папку через BasicAuth или IP allowlist до публичного открытия.
+- Пример BasicAuth лежит в `.htaccess.example`; он предполагает, что `/home/d/dtalke/.htpasswd` уже создан.
+- Удалите `phpver.php` из папки развертывания.
+- Не оставляйте debug output включенным.
+- Не коммитьте `config.local.php`, `logs/`, `storage/`, `.htpasswd`, дампы базы или реальные учетные данные.
+- Ротируйте учетные данные, если они попадали в чаты, скриншоты или логи.
+- Перед любым запуском без dry-run сделайте свежую резервную копию базы.
+- Реальный запуск требует отметку о резервной копии и точную фразу `ANONYMIZE`.
+- PROD-похожие цели заблокированы, пока в локальной конфигурации явно не указано `'allow_prod' => true`.
+
+## Рабочий порядок
+
+1. Откройте страницу и введите токен доступа.
+2. Убедитесь, что бейдж окружения показывает `TEST`.
+3. Убедитесь, что БД равна `dtalke_test_shop`.
+4. Запустите `Предпросмотр` с настройкой 365 дней по умолчанию.
+5. Проверьте найденные поля `shop_order_params` и снимите отметку с технических полей.
+6. Оставьте включенным `Пробный запуск без записи` и нажмите `Запустить`.
+7. Проверьте ход выполнения и логи.
+8. Только после проверки логов отключите dry-run, отметьте резервную копию, введите `ANONYMIZE` и выполните реальный запуск.
+
+После каждого реального запуска поле `ANONYMIZE` очищается автоматически, чтобы страница не оставалась подготовленной к повторному изменению базы. Состояние чекбокса резервной копии при этом не меняется.
+
+У настроек с чекбоксами есть подсказки: наведите курсор или переведите фокус на настройку, и через примерно 2 секунды появится пояснение.
+
+Рядом с полем `Срок хранения, дней` показывается информационная дата отсечения по времени браузера. После `Предпросмотр` интерфейс дополнительно показывает серверную дату отсечения, и именно серверная дата используется backend-логикой.
+
+После каждого пакета и после завершения запуска интерфейс показывает номера обработанных заказов. Если номера числовые и идут подряд, они сворачиваются в диапазоны, например `#1702-#1710, #1715`. Полный список диапазонов также попадает в batch JSON-лог.
+
+## Политика плейсхолдеров
+
+Новые обезличенные значения не должны выглядеть как реальные контактные данные:
+
+- имя контакта: `Обезличен`;
+- email заказов: `obezlicheno+order_<ORDER_ID>@obezlicheno.invalid`;
+- email контактов: `obezlicheno+contact_<CONTACT_ID>_<ROW_ID>@obezlicheno.invalid`;
+- телефоны заказов: `obezlicheno-order-<hash>`;
+- телефоны контактов: `obezlicheno-contact-<hash>`;
+- user agent: `обезличено`.
+
+Домен `.invalid` зарезервирован как недоставляемый. Инструмент не использует домен магазина и не создает доставляемые адреса.
+
+При запуске инструмент также нормализует старые значения, которые были сгенерированы предыдущими версиями самого инструмента:
+
+- `Deleted` превращается в `Обезличен`;
+- `anon+contact_...@example.invalid` и `anon+order_...@example.invalid` переносятся на `obezlicheno.invalid`;
+- `anon-contact-...` и `anon-order-...` получают префиксы `obezlicheno-contact-...` и `obezlicheno-order-...`.
+
+Нормализация применяется только к явно распознаваемым старым плейсхолдерам. В dry-run она только считается и показывается в предпросмотре/логах, без записи в базу.
+
+## Догоняющая обработка контактов
+
+Включите `Обезличить контакты без новых заказов`, затем выберите источник контактов:
+
+- `Контакты по уже обработанным старым заказам`;
+- `Контакты по ещё не обработанным старым заказам`;
+- `Контакты по всем старым заказам`.
+
+Используйте первый режим, если старые заказы уже были обезличены без обработки контактов.
+
+Обработка контактов:
+
+- ищет контакты по старым заказам до даты отсечения в выбранном источнике;
+- при выборе уже обработанных заказов не изменяет заказы и не пишет маркеры обработки заказов;
+- при других источниках контактная выборка всё равно независима от текущего пакета заказов;
+- пропускает контакты, у которых есть заказы новее выбранного срока хранения;
+- пропускает уже обработанные контакты по таблице `depersonalizer_state`;
+- пропускает staff/backend/user/login контакты по существующей защите;
+- соблюдает dry-run и реальные защиты с резервной копией, `ANONYMIZE` и `allow_prod`;
+- при реальном запуске записывает состояние обработанных контактов в `depersonalizer_state`.
+
+## История выполнения заказов
+
+Даже после обезличивания параметров заказа и контактов персональные данные могут оставаться в истории выполнения заказа: в текстах действий, комментариях, именах покупателей, номерах отправлений и других свободных полях.
+
+Имена сотрудников, администраторов и операторов сохраняются по умолчанию. Это аудит действий магазина, а не customer PII. Отдельного режима обезличивания сотрудников сейчас нет.
+
+Для этого есть отдельный чекбокс `Обезличить историю выполнения заказов`.
+
+Он:
+
+- работает по старым заказам до даты отсечения;
+- может запускаться после того, как сами заказы уже помечены обработанными;
+- не удаляет строки истории;
+- не меняет ID заказа, статус, workflow, даты, суммы, товары, позиции, оплаты, тарифы доставки и отчеты;
+- обновляет только безопасно распознанные текстовые колонки таблицы `shop_order_log`, если таблица и такие колонки существуют;
+- не обрабатывает `actor_name`, `name`, ID акторов и другие колонки, которые могут отвечать за атрибуцию сотрудника;
+- заменяет содержимое выбранных текстовых колонок на `Запись истории заказа обезличена`;
+- ставит отдельные маркеры в `shop_order_params`:
+  - `_depersonalizer_order_log_processed = 1`
+  - `_depersonalizer_order_log_processed_at = timestamp`
+
+Сначала запускайте этот режим с включенным `Пробный запуск без записи`: предпросмотр и пакетные логи покажут, сколько строк истории будет обработано. Предпросмотр также показывает:
+
+- существует ли `shop_order_log`;
+- все найденные колонки таблицы;
+- какие колонки считаются безопасными текстовыми;
+- сколько строк истории найдено у старых заказов;
+- сколько строк содержит безопасный текст;
+- сколько строк будет обработано;
+- сколько заказов уже помечено обработанными по истории;
+- причину, если строк к обработке нет.
+
+Если в интерфейсе Shop-Script всё ещё видна история с персональными данными, а safe-mode показывает ноль строк, вероятно, видимый текст строится из структурированных `params`/`data`. Такой случай требует отдельного schema-specific обработчика и сейчас намеренно не меняется вслепую.
+
+## Что изменяет инструмент
+
+- Заказы выбираются из `shop_order` по условию `create_datetime < cutoff`.
+- Уже обработанные заказы пропускаются по маркерам в `shop_order_params`:
+  - `_depersonalizer_ext_processed = 1`
+  - `_depersonalizer_ext_processed_at = timestamp`
+- Персональные данные меняются только в выбранных ключах `shop_order_params`.
+- `payment_name` и `shipping_name` исключены из автоматического поиска PII: это обычно названия способов оплаты и доставки, а не персональные данные.
+- Если старые версии инструмента уже повредили `payment_name` или `shipping_name` значениями вроде `Deleted`, предпросмотр покажет количество таких служебных полей. Инструмент не угадывает исходные названия; восстановление может потребовать backup или пересчета из данных Shop-Script/плагинов.
+- Технические поля SDEK/CDEK (`sdekint_plugin.`, `cdek.`, `cdek_`, `sdek.`, `sdek_`) сейчас исключены из автоматического поиска и не трогаются.
+- При включенном geo snapshot сохраняются только грубые значения `geo_city`, `geo_region`, `geo_country`, `geo_lat`, `geo_lng`; существующие непустые `geo_*` не перезаписываются.
+- Необязательное обезличивание контактов применяется только к контактам без новых заказов.
+- Обработка контактов может работать по уже обработанным, ещё не обработанным или всем старым заказам.
+- История выполнения заказов обрабатывается только при отдельном включении чекбокса `Обезличить историю выполнения заказов`.
+- Состояние контактов хранится в standalone-таблице `depersonalizer_state`; `wa_contact_params` необязательна.
+- Инструмент не удаляет строки заказов/контактов и не меняет товары, позиции, суммы, статусы, оплаты, тарифы доставки или отчеты.
+
+## Проверки после развертывания
+
+Проверка синтаксиса на Beget:
+
+```bash
+cd /home/d/dtalke/shop.incyber.ru/public_html/test/tools/depersonalizer
+/usr/local/php-cgi/8.1/bin/php -l index.php
+/usr/local/php-cgi/8.1/bin/php -l src/StandaloneConfigLoader.php
+/usr/local/php-cgi/8.1/bin/php -l src/StandaloneDepersonalizer.php
+```
+
+Диагностика колонок истории заказов после подключения к тестовой БД:
+
+```sql
+SELECT COLUMN_NAME, COLUMN_TYPE
+FROM information_schema.COLUMNS
+WHERE TABLE_SCHEMA = DATABASE()
+  AND TABLE_NAME = 'shop_order_log'
+ORDER BY ORDINAL_POSITION;
+```
+
+Проверка оставшихся старых плейсхолдеров после реального запуска:
+
+```sql
+SELECT COUNT(*) AS old_deleted_contacts
+FROM wa_contact
+WHERE name = 'Deleted'
+   OR firstname = 'Deleted'
+   OR middlename = 'Deleted'
+   OR lastname = 'Deleted'
+   OR company = 'Deleted'
+   OR jobtitle = 'Deleted'
+   OR about = 'Deleted';
+
+SELECT COUNT(*) AS old_example_invalid_emails
+FROM wa_contact_emails
+WHERE email LIKE '%@example.invalid';
+
+SELECT COUNT(*) AS old_anon_contact_values
+FROM wa_contact_data
+WHERE value LIKE 'anon-contact-%'
+   OR value LIKE 'anon-order-%';
+
+SELECT COUNT(*) AS old_order_param_placeholders
+FROM shop_order_params
+WHERE value = 'Deleted'
+   OR value LIKE '%@example.invalid'
+   OR value LIKE 'anon-contact-%'
+   OR value LIKE 'anon-order-%';
+
+SELECT COUNT(*) AS damaged_payment_shipping_names
+FROM shop_order_params
+WHERE name IN ('payment_name', 'shipping_name')
+  AND (
+      value = 'Deleted'
+      OR value LIKE '%@example.invalid'
+      OR value LIKE 'anon-contact-%'
+      OR value LIKE 'anon-order-%'
+  );
+```
+
+Для `shop_order_log` универсальную проверку лучше составить после просмотра реальных колонок командой выше. Не добавляйте реальные имена клиентов или операторов в код репозитория.
+
+## Логи
+
+Логи создаются автоматически:
+
+```text
+logs/depersonalizer.log
+logs/batches/YYYY-MM-DD/batch-HH-MM-SS-random.json
+```
+
+Batch-логи содержат run id, timestamp, признак dry-run, options, cutoff, обработанные/пропущенные ID заказов и контактов, компактный список номеров заказов, а также выбранные include keys. Исходные значения персональных данных не логируются.
+
+## Старый плагин
+
+`legacy-plugin/` только для справки. Поддерживаемый продукт - standalone-страница в корне репозитория.
