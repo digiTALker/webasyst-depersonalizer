@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 
-const DEPLOYED_VERSION = '0.6.0-history-diagnostics';
+const DEPLOYED_VERSION = '0.7.0-audit-hardening';
 
 function depersonalizerSessionCookiePath(): string
 {
@@ -14,6 +14,8 @@ function depersonalizerSessionCookiePath(): string
     return rtrim($dir, '/') . '/';
 }
 
+ini_set('session.use_strict_mode', '1');
+ini_set('session.use_only_cookies', '1');
 session_name('depersonalizer_sid');
 session_set_cookie_params(array(
     'lifetime' => 0,
@@ -26,6 +28,7 @@ session_start();
 
 require_once __DIR__ . '/src/StandaloneConfigLoader.php';
 require_once __DIR__ . '/src/StandaloneDepersonalizer.php';
+require_once __DIR__ . '/src/StandaloneRunSession.php';
 
 /**
  * @param array<string, mixed> $payload
@@ -67,12 +70,40 @@ function depersonalizerEnv(string $name): string
  */
 function depersonalizerAccessConfigured(array $config): bool
 {
-    return depersonalizerEnv('DEPERSONALIZER_ACCESS_TOKEN') !== ''
-        || depersonalizerEnv('DEPERSONALIZER_ACCESS_TOKEN_HASH') !== ''
-        || depersonalizerEnv('DEPERSONALIZER_ACCESS_TOKEN_SHA256') !== ''
-        || trim((string)($config['access_token'] ?? '')) !== ''
-        || trim((string)($config['access_token_hash'] ?? '')) !== ''
-        || trim((string)($config['access_token_sha256'] ?? '')) !== '';
+    return depersonalizerTokenSettings($config)[1] !== '';
+}
+
+function depersonalizerTokenSettings(array $config): array
+{
+    $types = array('access_token', 'access_token_sha256', 'access_token_hash');
+    foreach ($types as $type) {
+        $value = depersonalizerEnv('DEPERSONALIZER_' . strtoupper($type));
+        if ($value !== '') {
+            return array($type, $value);
+        }
+    }
+    foreach ($types as $type) {
+        $value = trim((string)($config[$type] ?? ''));
+        if ($value !== '') {
+            return array($type, $value);
+        }
+    }
+    return array('', '');
+}
+
+function depersonalizerTokenFingerprint(array $config): string
+{
+    return hash('sha256', json_encode(depersonalizerTokenSettings($config)));
+}
+
+function depersonalizerSafeError(Throwable $error): string
+{
+    if ($error instanceof PDOException || !($error instanceof RuntimeException)) {
+        $id = bin2hex(random_bytes(6));
+        error_log('depersonalizer error=' . $id . ' type=' . get_class($error) . ' code=' . (string)$error->getCode());
+        return 'Операция не выполнена. Проверьте права БД, схему и журнал сервера. Код ошибки: ' . $id;
+    }
+    return $error->getMessage();
 }
 
 /**
@@ -81,36 +112,17 @@ function depersonalizerAccessConfigured(array $config): bool
 function depersonalizerVerifyAccessToken(string $token, array $config): bool
 {
     $token = trim($token);
-    if ($token === '') {
+    [$type, $expected] = depersonalizerTokenSettings($config);
+    if ($token === '' || $expected === '') {
         return false;
     }
-
-    $plainToken = depersonalizerEnv('DEPERSONALIZER_ACCESS_TOKEN');
-    if ($plainToken === '') {
-        $plainToken = trim((string)($config['access_token'] ?? ''));
+    if ($type === 'access_token') {
+        return hash_equals($expected, $token);
     }
-    if ($plainToken !== '' && hash_equals($plainToken, $token)) {
-        return true;
+    if ($type === 'access_token_sha256') {
+        return preg_match('/^[a-f0-9]{64}$/i', $expected) === 1 && hash_equals(strtolower($expected), hash('sha256', $token));
     }
-
-    $sha256 = depersonalizerEnv('DEPERSONALIZER_ACCESS_TOKEN_SHA256');
-    if ($sha256 === '') {
-        $sha256 = trim((string)($config['access_token_sha256'] ?? ''));
-    }
-    $sha256 = strtolower($sha256);
-    if ($sha256 !== '' && preg_match('/^[a-f0-9]{64}$/', $sha256) === 1) {
-        return hash_equals($sha256, hash('sha256', $token));
-    }
-
-    $passwordHash = depersonalizerEnv('DEPERSONALIZER_ACCESS_TOKEN_HASH');
-    if ($passwordHash === '') {
-        $passwordHash = trim((string)($config['access_token_hash'] ?? ''));
-    }
-    if ($passwordHash !== '') {
-        return password_verify($token, $passwordHash);
-    }
-
-    return false;
+    return password_verify($token, $expected);
 }
 
 function depersonalizerBearerToken(): string
@@ -128,8 +140,13 @@ function depersonalizerBearerToken(): string
  */
 function depersonalizerIsAuthorized(array $config): bool
 {
-    if (!empty($_SESSION['depersonalizer_authenticated'])) {
+    if (!empty($_SESSION['depersonalizer_authenticated'])
+        && hash_equals(depersonalizerTokenFingerprint($config), (string)($_SESSION['depersonalizer_token_fingerprint'] ?? ''))
+        && time() - (int)($_SESSION['depersonalizer_authenticated_at'] ?? 0) < 14400) {
         return true;
+    }
+    if (isset($_SESSION['depersonalizer_authenticated'])) {
+        unset($_SESSION['depersonalizer_authenticated'], $_SESSION['depersonalizer_token_fingerprint'], $_SESSION['depersonalizer_run']);
     }
 
     $bearerToken = depersonalizerBearerToken();
@@ -152,17 +169,10 @@ function depersonalizerIsAuthorized(array $config): bool
 function depersonalizerDetectEnvironment(array $config): array
 {
     $database = strtolower(trim((string)($config['database'] ?? '')));
-    $host = strtolower(trim((string)($config['host'] ?? '')));
-    $scriptPath = strtolower(str_replace('\\', '/', (string)($_SERVER['SCRIPT_FILENAME'] ?? '')));
-    $requestUri = strtolower((string)($_SERVER['REQUEST_URI'] ?? ''));
-
-    $looksTest = strpos($database, '_test_') !== false
-        || strpos($scriptPath, '/test/') !== false
-        || strpos($requestUri, '/test/') !== false
-        || strpos($host, 'test') !== false;
+    $looksTest = strpos($database, '_test_') !== false;
 
     $looksProd = $database === 'dtalke_shop' || !$looksTest;
-    $allowProd = !empty($config['allow_prod']);
+    $allowProd = ($config['allow_prod'] ?? false) === true;
 
     return array(
         'label' => $looksProd ? 'PROD' : 'TEST',
@@ -174,9 +184,9 @@ function depersonalizerDetectEnvironment(array $config): array
 
 function depersonalizerRedirectBack(): void
 {
-    $target = strtok((string)($_SERVER['REQUEST_URI'] ?? ''), "\r\n");
-    if ($target === false || $target === '') {
-        $target = (string)($_SERVER['SCRIPT_NAME'] ?? 'index.php');
+    $target = (string)($_SERVER['SCRIPT_NAME'] ?? '/index.php');
+    if (!str_starts_with($target, '/') || str_starts_with($target, '//') || preg_match('/[\r\n]/', $target)) {
+        $target = '/index.php';
     }
 
     header('Location: ' . $target);
@@ -275,7 +285,14 @@ function renderAccessPage(bool $isConfigured, ?string $error = null): void
     exit;
 }
 
-$dbConfig = StandaloneConfigLoader::load(__DIR__);
+try {
+    $dbConfig = StandaloneConfigLoader::load(__DIR__);
+} catch (Throwable $error) {
+    http_response_code(503);
+    header('Content-Type: text/plain; charset=utf-8');
+    echo 'Ошибка конфигурации: ' . depersonalizerSafeError($error);
+    exit;
+}
 $requestMethod = (string)($_SERVER['REQUEST_METHOD'] ?? 'GET');
 $requestAction = (string)($_POST['action'] ?? '');
 $accessConfigured = depersonalizerAccessConfigured($dbConfig);
@@ -288,6 +305,9 @@ if ($requestMethod === 'POST' && $requestAction === 'login') {
     if (depersonalizerVerifyAccessToken((string)($_POST['access_token'] ?? ''), $dbConfig)) {
         session_regenerate_id(true);
         $_SESSION['depersonalizer_authenticated'] = true;
+        $_SESSION['depersonalizer_token_fingerprint'] = depersonalizerTokenFingerprint($dbConfig);
+        $_SESSION['depersonalizer_authenticated_at'] = time();
+        $_SESSION['depersonalizer_csrf'] = bin2hex(random_bytes(24));
         depersonalizerRedirectBack();
     }
 
@@ -295,7 +315,11 @@ if ($requestMethod === 'POST' && $requestAction === 'login') {
 }
 
 if ($requestMethod === 'POST' && $requestAction === 'logout') {
-    unset($_SESSION['depersonalizer_authenticated'], $_SESSION['depersonalizer_csrf']);
+    if (empty($_SESSION['depersonalizer_csrf']) ||
+        !hash_equals((string)$_SESSION['depersonalizer_csrf'], (string)($_POST['csrf_token'] ?? ''))) {
+        jsonResponse(array('ok' => false, 'error' => 'Проверка CSRF не пройдена.'), 403);
+    }
+    $_SESSION = array();
     session_regenerate_id(true);
     depersonalizerRedirectBack();
 }
@@ -350,21 +374,24 @@ if ($missingConfigKeys) {
 
         $service = new StandaloneDepersonalizer($pdo, __DIR__ . DIRECTORY_SEPARATOR . 'logs');
         $mysqlVersion = $service->getMysqlVersion();
-        $setupStateTable = $requestMethod === 'GET';
-        $setupStateTable = $setupStateTable
-            && (empty($environment['is_prod']) || !empty($environment['allow_prod']));
-        $preflight = $service->preflight($setupStateTable);
+        $preflight = $service->preflight(false);
 
         if (!empty($preflight['missing_required_tables'])) {
             $schemaError = 'Отсутствуют обязательные таблицы: ' . implode(', ', $preflight['missing_required_tables']);
+        } elseif (!empty($preflight['schema_errors'])) {
+            $schemaError = implode(' ', $preflight['schema_errors']);
         }
     } catch (PDOException $error) {
-        $dbConnectionError = $error->getMessage();
+        if ($service instanceof StandaloneDepersonalizer) {
+            $schemaError = depersonalizerSafeError($error);
+        } else {
+            $dbConnectionError = depersonalizerSafeError($error);
+        }
     } catch (Throwable $error) {
         if ($service instanceof StandaloneDepersonalizer) {
-            $schemaError = $error->getMessage();
+            $schemaError = depersonalizerSafeError($error);
         } else {
-            $configError = $error->getMessage();
+            $configError = depersonalizerSafeError($error);
         }
     }
 }
@@ -377,7 +404,7 @@ $pageReady = $service instanceof StandaloneDepersonalizer
 if ($requestMethod === 'POST') {
     $action = (string)($_POST['action'] ?? '');
 
-    if (!in_array($action, array('preview', 'run'), true)) {
+    if (!in_array($action, array('preview', 'start', 'run', 'stop'), true)) {
         jsonResponse(array('ok' => false, 'error' => 'Неподдерживаемое действие.'), 400);
     }
 
@@ -400,54 +427,41 @@ if ($requestMethod === 'POST') {
     }
 
     try {
-        if ($action === 'preview') {
-            $days = readPostInt('days', 365);
-            $preview = $service->preview($days);
-            $preview['tool_version'] = DEPLOYED_VERSION;
-            jsonResponse(array('ok' => true, 'data' => $preview));
-        }
-
-        $options = array(
-            'days' => readPostInt('days', 365),
-            'limit' => readPostInt('limit', 200),
-            'cursor' => readPostInt('cursor', 0),
-            'history_cursor' => readPostInt('history_cursor', 0),
-            'contact_cursor' => readPostInt('contact_cursor', 0),
-            'keep_geo' => readPostBool('keep_geo'),
-            'wipe_comments' => readPostBool('wipe_comments'),
-            'anonymize_contacts' => readPostBool('anonymize_contacts'),
-            'contact_catchup_only' => readPostBool('contact_catchup_only'),
-            'contact_order_scope' => (string)($_POST['contact_order_scope'] ?? 'processed'),
-            'anonymize_order_history' => readPostBool('anonymize_order_history'),
-            'dry_run' => readPostBool('dry_run'),
-            'backup_confirmed' => readPostBool('backup_confirmed'),
-            'confirmation_phrase' => (string)($_POST['confirmation_phrase'] ?? ''),
-            'run_id' => (string)($_POST['run_id'] ?? ''),
-            'include_keys' => isset($_POST['include_keys']) && is_array($_POST['include_keys'])
-                ? array_values($_POST['include_keys'])
-                : array(),
-        );
-
-        if (empty($options['dry_run'])) {
-            if (empty($environment['can_run_real'])) {
-                jsonResponse(array(
-                    'ok' => false,
-                    'error' => 'Обнаружена среда, похожая на продакшен. Установите allow_prod => true в config.local.php только после проверки целевой БД.',
-                ), 403);
-            }
-            if (empty($options['backup_confirmed']) || trim((string)$options['confirmation_phrase']) !== 'ANONYMIZE') {
-                jsonResponse(array(
-                    'ok' => false,
-                    'error' => 'Для реального обезличивания нужна отметка о свежей резервной копии и точное подтверждение ANONYMIZE.',
-                ), 400);
+        $runs = new StandaloneRunSession($_SESSION, $service);
+        $binding = hash('sha256', json_encode($dbConfig) . depersonalizerTokenFingerprint($dbConfig));
+        if ($action === 'run') {
+            $result = $runs->batch((string)($_POST['run_id'] ?? ''), readPostInt('batch', -1), $binding);
+        } elseif ($action === 'stop') {
+            $runs->stop((string)($_POST['run_id'] ?? ''), $binding);
+            $result = array('stopped' => true);
+        } else {
+            $options = array(
+                'days' => readPostInt('days', 365), 'limit' => readPostInt('limit', 200),
+                'anonymize_orders' => readPostBool('anonymize_orders'),
+                'keep_geo' => readPostBool('keep_geo'), 'wipe_comments' => readPostBool('wipe_comments'),
+                'anonymize_contacts' => readPostBool('anonymize_contacts'),
+                'contact_order_scope' => (string)($_POST['contact_order_scope'] ?? 'processed'),
+                'anonymize_order_history' => readPostBool('anonymize_order_history'),
+                'dry_run' => !isset($_POST['dry_run']) || readPostBool('dry_run'),
+                'backup_confirmed' => readPostBool('backup_confirmed'),
+                'confirmation_phrase' => (string)($_POST['confirmation_phrase'] ?? ''),
+                'run_id' => (string)($_POST['run_id'] ?? ''), 'keys_reviewed' => readPostBool('keys_reviewed'),
+                'include_keys' => isset($_POST['include_keys']) && is_array($_POST['include_keys'])
+                    ? array_values($_POST['include_keys']) : array(),
+            );
+            if ($action === 'preview') {
+                $result = $service->preview($options['days'], $options);
+            } else {
+                if (!$options['dry_run'] && !$environment['can_run_real']) {
+                    jsonResponse(array('ok' => false, 'error' => 'Реальный запуск в PROD запрещен без allow_prod => true.'), 403);
+                }
+                $result = $runs->start($options, $binding);
             }
         }
-
-        $result = $service->runBatch($options);
         $result['tool_version'] = DEPLOYED_VERSION;
         jsonResponse(array('ok' => true, 'data' => $result));
     } catch (Throwable $error) {
-        jsonResponse(array('ok' => false, 'error' => $error->getMessage()), 500);
+        jsonResponse(array('ok' => false, 'error' => depersonalizerSafeError($error)), 500);
     }
 }
 
@@ -782,6 +796,7 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
             <div style="margin-top: 6px;"><strong>Схема:</strong> <code><?php echo $pageReady ? 'совместима' : 'не готова'; ?></code></div>
             <form method="post" style="margin-top: 10px;">
                 <input type="hidden" name="action" value="logout">
+                <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8'); ?>">
                 <button class="btn-ghost" type="submit">Закрыть доступ</button>
             </form>
         </div>
@@ -865,9 +880,10 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
                 </div>
 
                 <div class="checkbox-row">
+                    <label tabindex="0" data-tooltip="Разрешает изменение только выбранных полей заказов. Пустой выбор не очищает параметры. Контакты и история включаются отдельно."><input type="checkbox" name="anonymize_orders" value="1"> Обезличить выбранные поля заказов</label>
                     <label tabindex="0" data-tooltip="Перед очисткой адресных полей сохраняет грубую географию в geo_city, geo_region, geo_country, geo_lat и geo_lng. Существующие непустые geo_* не перезаписываются."><input type="checkbox" name="keep_geo" value="1" checked> Сохранить гео-снимок в <code>geo_*</code></label>
-                    <label tabindex="0" data-tooltip="Очищает выбранные поля комментариев. Включайте только если в комментариях могут быть персональные данные."><input type="checkbox" name="wipe_comments" value="1"> Стереть комментарии заказов</label>
-                    <label tabindex="0" data-tooltip="Дополнительно обезличивает карточки контактов, у которых нет заказов новее выбранного срока хранения. Более рискованный режим, чем обработка только заказов."><input type="checkbox" name="anonymize_contacts" value="1" <?php echo empty($optionalTables['wa_contact']) || empty($optionalTables['state_table_ready']) ? 'disabled' : ''; ?>> Обезличить контакты без новых заказов</label>
+                    <label tabindex="0" data-tooltip="При включенной обработке заказов очищает shop_order.comment и поля комментариев в параметрах заказов, даже если они не выбраны отдельно."><input type="checkbox" name="wipe_comments" value="1"> Стереть комментарии заказов</label>
+                    <label tabindex="0" data-tooltip="Обезличивает карточки контактов без новых заказов. Заказы не меняются, если их обработка отдельно не включена."><input type="checkbox" name="anonymize_contacts" value="1" <?php echo empty($optionalTables['wa_contact']) ? 'disabled' : ''; ?>> Обезличить контакты без новых заказов</label>
                     <label tabindex="0" data-tooltip="Очищает текстовые записи истории заказа, где могут оставаться имена, ФИО, номера отправлений, комментарии и другие персональные данные. Даты, статусы и структура заказа не удаляются."><input type="checkbox" name="anonymize_order_history" value="1"> Обезличить историю выполнения заказов</label>
                     <label tabindex="0" data-tooltip="Показывает, что было бы обработано, но не записывает изменения в базу. Рекомендуется всегда сначала запускать этот режим."><input type="checkbox" name="dry_run" value="1" checked> Пробный запуск без записи</label>
                 </div>
@@ -877,7 +893,7 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
                     <label><input type="radio" name="contact_order_scope" value="processed" checked> Контакты по уже обработанным старым заказам</label>
                     <label><input type="radio" name="contact_order_scope" value="unprocessed"> Контакты по ещё не обработанным старым заказам</label>
                     <label><input type="radio" name="contact_order_scope" value="all"> Контакты по всем старым заказам</label>
-                    <div class="hint">При выборе уже обработанных заказов запускается только обработка контактов; сами заказы не меняются.</div>
+                    <div class="hint">Источник контактов не включает обработку заказов. Заказы меняются только при отдельном разрешении выше.</div>
                 </div>
 
                 <div class="protection">
@@ -935,6 +951,8 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
 
     let stopRequested = false;
     let runOrderIdentifiers = [];
+    let keysReviewed = false;
+    const disabledStates = new Map();
 
     function generateRunId() {
         const bytes = new Uint8Array(8);
@@ -951,6 +969,17 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
     }
 
     function setBusy(isBusy) {
+        if (isBusy) {
+            Array.from(form.elements).forEach((node) => {
+                if (node !== stopBtn) {
+                    disabledStates.set(node, node.disabled);
+                    node.disabled = true;
+                }
+            });
+        } else {
+            disabledStates.forEach((disabled, node) => { node.disabled = disabled; });
+            disabledStates.clear();
+        }
         previewBtn.disabled = isBusy;
         runBtn.disabled = isBusy;
         stopBtn.disabled = !isBusy;
@@ -986,7 +1015,7 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
         const numbers = [];
         for (const value of unique) {
             const match = value.match(/^#(\d+)$/);
-            if (!match) {
+            if (!match || !Number.isSafeInteger(Number(match[1])) || String(Number(match[1])) !== match[1]) {
                 const list = unique.slice(0, maxRanges);
                 if (unique.length > maxRanges) {
                     list.push('... и ещё ' + (unique.length - maxRanges));
@@ -1026,16 +1055,18 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
             csrf_token: fd.get('csrf_token') || '',
             days: fd.get('days') || '365',
             limit: fd.get('limit') || '200',
+            anonymize_orders: fd.get('anonymize_orders') ? '1' : '0',
             keep_geo: fd.get('keep_geo') ? '1' : '0',
             wipe_comments: fd.get('wipe_comments') ? '1' : '0',
             anonymize_contacts: fd.get('anonymize_contacts') ? '1' : '0',
-            contact_catchup_only: fd.get('anonymize_contacts') && contactOrderScope === 'processed' ? '1' : '0',
+            contact_catchup_only: fd.get('anonymize_contacts') && !fd.get('anonymize_orders') ? '1' : '0',
             contact_order_scope: contactOrderScope,
             anonymize_order_history: fd.get('anonymize_order_history') ? '1' : '0',
             dry_run: fd.get('dry_run') ? '1' : '0',
             backup_confirmed: fd.get('backup_confirmed') ? '1' : '0',
             confirmation_phrase: fd.get('confirmation_phrase') || '',
-            include_keys: []
+            include_keys: [],
+            keys_reviewed: keysReviewed ? '1' : '0'
         };
 
         const selectedKeys = form.querySelectorAll('input[name="include_keys[]"]:checked');
@@ -1148,10 +1179,12 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
     }
 
     function renderKeys(keys) {
+        const selected = new Set(Array.from(form.querySelectorAll('input[name="include_keys[]"]:checked')).map(node => node.value));
         keysList.innerHTML = '';
 
         if (!keys.length) {
             keysList.innerHTML = '<div class="kitem">Подходящие поля не найдены.</div>';
+            keysReviewed = true;
             return;
         }
 
@@ -1162,12 +1195,13 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
             checkbox.type = 'checkbox';
             checkbox.name = 'include_keys[]';
             checkbox.value = key;
-            checkbox.checked = true;
+            checkbox.checked = keysReviewed ? selected.has(key) : !/comment/i.test(key);
 
             item.appendChild(checkbox);
             item.appendChild(document.createTextNode(' ' + key));
             keysList.appendChild(item);
         });
+        keysReviewed = true;
     }
 
     function updateProgress(progress, total, done) {
@@ -1181,14 +1215,13 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
 
     previewBtn.addEventListener('click', async function () {
         try {
+            if (!form.checkValidity()) {
+                throw new Error('Проверьте срок хранения и размер пакета.');
+            }
+            const state = collectFormState();
             setBusy(true);
             appendLog('Предпросмотр запущен.');
-            const state = collectFormState();
-            const result = await postAction({
-                action: 'preview',
-                csrf_token: state.csrf_token,
-                days: state.days
-            });
+            const result = await postAction(Object.assign(state, {action: 'preview'}));
 
             previewBlock.style.display = 'block';
             const contactCatchup = result.contact_catchup || {};
@@ -1254,110 +1287,79 @@ if (is_array($preflight) && isset($preflight['safe_mode_notes']) && is_array($pr
         progressBar.style.width = '0%';
         progressText.textContent = 'Запуск...';
         progressText.className = 'status';
-
-        let cursor = 0;
-        let historyCursor = 0;
-        let contactCursor = 0;
         runOrderIdentifiers = [];
-        const runId = generateRunId();
-
+        let activeRun = '';
+        let realIntent = false;
+        let contacts = 0;
+        let historyRows = 0;
+        const state = collectFormState();
         try {
-            const initialState = collectFormState();
-            validateRealRun(initialState);
-            const runIsDryRun = initialState.dry_run === '1';
-            const storedConfirmationPhrase = initialState.confirmation_phrase;
-            if (runIsDryRun && initialState.anonymize_order_history === '1') {
-                appendLog('Обработка истории заказов запущена в dry-run: записи не будут изменены.');
+            if (!form.checkValidity()) {
+                throw new Error('Проверьте срок хранения и размер пакета.');
             }
-            if (!runIsDryRun) {
-                const confirmationInput = form.querySelector('input[name="confirmation_phrase"]');
-                if (confirmationInput) {
-                    confirmationInput.value = '';
-                }
-                appendLog('Поле подтверждения ANONYMIZE очищено для защиты от повторного реального запуска.');
-            }
-
+            validateRealRun(state);
+            realIntent = state.dry_run === '0';
+            state.run_id = generateRunId();
+            state.action = 'start';
+            activeRun = state.run_id;
             setBusy(true);
-            appendLog('Запуск начат. run_id=' + runId + '.');
+            const start = await postAction(state);
+            activeRun = start.run_id;
+            if (realIntent) {
+                form.querySelector('input[name="confirmation_phrase"]').value = '';
+            }
+            appendLog('Запуск начат. run_id=' + activeRun + '. Дата отсечения по серверу: ' + start.cutoff +
+                '. ' + (state.dry_run === '1' ? 'Пробный запуск без записи.' : 'Реальная обработка.'));
+            let batch = start.next_batch;
             while (true) {
-                const state = collectFormState();
-                state.dry_run = initialState.dry_run;
-                state.backup_confirmed = initialState.backup_confirmed;
-                state.confirmation_phrase = runIsDryRun ? state.confirmation_phrase : storedConfirmationPhrase;
-                state.contact_catchup_only = initialState.contact_catchup_only;
-                state.contact_order_scope = initialState.contact_order_scope;
-                state.anonymize_order_history = initialState.anonymize_order_history;
-                validateRealRun(state);
-
-                const payload = {
-                    action: 'run',
-                    csrf_token: state.csrf_token,
-                    days: state.days,
-                    limit: state.limit,
-                    cursor: String(cursor),
-                    history_cursor: String(historyCursor),
-                    contact_cursor: String(contactCursor),
-                    keep_geo: state.keep_geo,
-                    wipe_comments: state.wipe_comments,
-                    anonymize_contacts: state.anonymize_contacts,
-                    contact_catchup_only: state.contact_catchup_only,
-                    contact_order_scope: state.contact_order_scope,
-                    anonymize_order_history: state.anonymize_order_history,
-                    dry_run: state.dry_run,
-                    backup_confirmed: state.backup_confirmed,
-                    confirmation_phrase: state.confirmation_phrase,
-                    run_id: runId,
-                    include_keys: state.include_keys
-                };
-
-                const data = await postAction(payload);
-
-                cursor = Number(data.cursor || cursor);
-                historyCursor = Number(data.history_cursor || historyCursor);
-                contactCursor = Number(data.contact_cursor || contactCursor);
-                if (Array.isArray(data.processed_order_numbers)) {
-                    runOrderIdentifiers = runOrderIdentifiers.concat(data.processed_order_numbers);
-                }
-                updateProgress(Number(data.progress || 0), Number(data.total || 0), Boolean(data.done));
-
-                const batchOrderSummary = data.processed_order_numbers_summary || compactOrderIdentifiers(data.processed_order_numbers || []);
-                if (batchOrderSummary !== '') {
-                    appendLog('Обработаны заказы: ' + batchOrderSummary);
-                }
-
-                appendLog(
-                    'Пакет: обработано заказов=' + (data.processed_orders || []).length +
-                    ', пропущено заказов=' + Object.keys(data.skipped_orders || {}).length +
-                    ', обработано контактов=' + (data.processed_contacts || []).length +
-                    ', пропущено контактов=' + Object.keys(data.skipped_contacts || {}).length +
-                    ', строк истории обработано=' + (data.processed_history_rows || 0) +
-                    ', старых плейсхолдеров нормализовано=' + (data.normalized_placeholders || 0) +
-                    ', cursor=' + (data.cursor || 0) +
-                    ', history_cursor=' + (data.history_cursor || 0) +
-                    ', contact_cursor=' + (data.contact_cursor || 0) +
-                    ', dry_run=' + (data.dry_run ? 'да' : 'нет') +
-                    ', run_id=' + (data.run_id || 'n/a') +
-                    ', log=' + (data.batch_log || 'n/a')
-                );
-
                 if (stopRequested) {
-                    progressText.textContent = 'Остановлено пользователем на cursor=' + cursor;
-                    progressText.className = 'status err';
+                    await postAction({action: 'stop', csrf_token: state.csrf_token, run_id: activeRun});
+                    activeRun = '';
+                    progressText.textContent = 'Остановлено пользователем.';
                     break;
                 }
-
+                const data = await postAction({action: 'run', csrf_token: state.csrf_token, run_id: activeRun, batch: String(batch)});
+                batch = data.next_batch;
+                runOrderIdentifiers = runOrderIdentifiers.concat(data.processed_order_numbers || []);
+                contacts += (data.processed_contacts || []).length;
+                historyRows += Number(data.processed_history_rows || 0);
+                updateProgress(Number(data.progress), Number(data.total), Boolean(data.done));
+                const numbers = data.processed_order_numbers_summary || compactOrderIdentifiers(data.processed_order_numbers || []);
+                if (numbers) {
+                    appendLog('Обработаны заказы: ' + numbers);
+                }
+                appendLog('Заказов в пакете: ' + (data.processed_orders || []).length +
+                    ', пропущено: ' + Object.keys(data.skipped_orders || {}).length +
+                    '; контактов: ' + (data.processed_contacts || []).length +
+                    ', пропущено: ' + Object.keys(data.skipped_contacts || {}).length +
+                    '; строк истории: ' + Number(data.processed_history_rows || 0) +
+                    '; нормализовано значений: ' + Number(data.normalized_placeholders || 0) +
+                    '; курсоры: ' + data.cursor + '/' + data.contact_cursor + '/' + data.history_cursor +
+                    '; журнал: ' + (data.batch_log || 'нет'));
+                (data.warnings || []).forEach(appendLog);
                 if (data.done) {
-                    const finalOrderSummary = compactOrderIdentifiers(runOrderIdentifiers);
-                    appendLog('Запуск завершен на cursor=' + cursor + '.');
-                    appendLog('Всего обработано заказов: ' + runOrderIdentifiers.length + '. Номера: ' + (finalOrderSummary || 'нет обработанных заказов') + '.');
+                    activeRun = '';
+                    appendLog('Запуск завершен. Всего обработано заказов: ' + runOrderIdentifiers.length +
+                        '. Номера: ' + (compactOrderIdentifiers(runOrderIdentifiers) || 'нет') +
+                        '. Контактов: ' + contacts + '. Строк истории: ' + historyRows + '.');
                     break;
                 }
             }
         } catch (error) {
+            if (activeRun !== '') {
+                try {
+                    await postAction({action: 'stop', csrf_token: state.csrf_token, run_id: activeRun});
+                } catch (stopError) {
+                    appendLog('Не удалось освободить запуск; блокировка истечет через 30 минут бездействия.');
+                }
+            }
             progressText.textContent = 'Ошибка: ' + String(error.message || error);
             progressText.className = 'status err';
-            appendLog('Ошибка запуска: ' + String(error.message || error));
+            appendLog(progressText.textContent);
         } finally {
+            if (realIntent || state.dry_run === '0') {
+                form.querySelector('input[name="confirmation_phrase"]').value = '';
+            }
             setBusy(false);
         }
     });

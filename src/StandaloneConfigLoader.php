@@ -4,7 +4,7 @@ declare(strict_types=1);
 final class StandaloneConfigLoader
 {
     /**
-     * Load database configuration from Webasyst config and overlay local settings when present.
+     * Local configuration is authoritative; never silently fall back to another database.
      *
      * @param string $baseDir Directory with this project.
      * @return array<string, mixed>
@@ -12,47 +12,38 @@ final class StandaloneConfigLoader
     public static function load(string $baseDir): array
     {
         $localPath = $baseDir . DIRECTORY_SEPARATOR . 'config.local.php';
-        $localConfig = null;
         if (is_file($localPath)) {
-            $config = include $localPath;
-            if (is_array($config)) {
-                $localConfig = self::expandLocalConfig($config);
-            }
+            $local = self::readConfig($localPath);
+            $local['__source'] = $localPath;
+            return self::normalize($local);
         }
-
         $waConfigPath = self::findWebasystDbConfig($baseDir);
         if ($waConfigPath !== null) {
-            $raw = include $waConfigPath;
-            if (is_array($raw)) {
-                $candidate = self::pickConnection($raw);
-                if ($candidate !== null) {
-                    if ($localConfig !== null) {
-                        $candidate = array_replace($candidate, $localConfig);
-                        $candidate['__source'] = $localPath . ' + ' . $waConfigPath;
-                    } else {
-                        $candidate['__source'] = $waConfigPath;
-                    }
-
-                    return self::normalize($candidate);
-                }
+            $candidate = self::pickConnection(self::readConfig($waConfigPath));
+            if ($candidate === null) {
+                throw new RuntimeException('Ошибка конфигурации: в ' . $waConfigPath . ' нет подключения к БД.');
             }
+            $candidate['__source'] = $waConfigPath;
+            return self::normalize($candidate);
         }
+        return self::normalize(array('__source' => null));
+    }
 
-        if ($localConfig !== null) {
-            $localConfig['__source'] = $localPath;
-            return self::normalize($localConfig);
+    private static function readConfig(string $path): array
+    {
+        ob_start();
+        try {
+            $config = include $path;
+            $output = (string)ob_get_contents();
+        } catch (Throwable $error) {
+            throw new RuntimeException('Ошибка конфигурации в ' . $path . ': проверьте синтаксис PHP.');
+        } finally {
+            ob_end_clean();
         }
-
-        return self::normalize(array(
-            'driver'   => 'mysql',
-            'host'     => '127.0.0.1',
-            'port'     => 3306,
-            'database' => '',
-            'user'     => '',
-            'password' => '',
-            'charset'  => 'utf8mb4',
-            '__source' => null,
-        ));
+        if ($output !== '' || !is_array($config)) {
+            throw new RuntimeException('Ошибка конфигурации в ' . $path . ': нужен массив без вывода, HTML и BOM.');
+        }
+        return $config;
     }
 
     /**
@@ -70,6 +61,11 @@ final class StandaloneConfigLoader
 
         $database = (string)$config['database'];
         $charset = (string)$config['charset'];
+        foreach (array('host', 'database', 'charset', 'socket') as $key) {
+            if (preg_match('/[;\x00-\x1f\x7f]/', (string)($config[$key] ?? ''))) {
+                throw new RuntimeException('Ошибка конфигурации: недопустимый разделитель DSN в ' . $key . '.');
+            }
+        }
 
         if (!empty($config['socket'])) {
             return sprintf(
@@ -119,6 +115,9 @@ final class StandaloneConfigLoader
     private static function normalize(array $raw): array
     {
         $raw = self::expandLocalConfig($raw);
+        if (isset($raw['allow_prod']) && !is_bool($raw['allow_prod'])) {
+            throw new RuntimeException('Ошибка конфигурации: allow_prod должен быть boolean true или false.');
+        }
         $driver = isset($raw['driver']) ? (string)$raw['driver'] : (string)($raw['type'] ?? 'mysql');
         if ($driver === 'mysqli') {
             $driver = 'mysql';
@@ -136,7 +135,7 @@ final class StandaloneConfigLoader
             'access_token' => (string)($raw['access_token'] ?? ''),
             'access_token_hash' => (string)($raw['access_token_hash'] ?? ''),
             'access_token_sha256' => (string)($raw['access_token_sha256'] ?? ''),
-            'allow_prod' => !empty($raw['allow_prod']),
+            'allow_prod' => ($raw['allow_prod'] ?? false) === true,
             '__source' => $raw['__source'] ?? null,
         );
     }
