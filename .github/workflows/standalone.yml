@@ -1,0 +1,61 @@
+name: Standalone regression
+
+on:
+  pull_request:
+    paths:
+      - 'index.php'
+      - 'src/Standalone*.php'
+      - 'tests/**'
+      - '.github/workflows/standalone.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  php81-mysql57:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    services:
+      mysql:
+        image: mysql:5.7
+        env:
+          MYSQL_DATABASE: depersonalizer_test_suite
+          MYSQL_ROOT_PASSWORD: synthetic-ci-only
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -psynthetic-ci-only"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.1'
+          extensions: pdo_mysql, pdo_sqlite
+          coverage: none
+          tools: none
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Syntax and BOM
+        run: |
+          php tests/check-files.php
+          php -l index.php
+          find src -maxdepth 1 -name 'Standalone*.php' -print0 | xargs -0 -n1 php -l
+          find tests -maxdepth 1 -name '*.php' -print0 | xargs -0 -n1 php -l
+          git diff --check
+      - name: PHP control flow and frontend
+        run: |
+          php tests/regression.php
+          node tests/frontend.cjs
+      - name: Real MySQL 5.7 SQL, transactions and locks
+        env:
+          DEPERSONALIZER_TEST_MYSQL: '1'
+          DEPERSONALIZER_TEST_DSN: 'mysql:host=127.0.0.1;port=3306;dbname=depersonalizer_test_suite'
+          DEPERSONALIZER_TEST_PASSWORD: synthetic-ci-only
+        run: php tests/regression.php
