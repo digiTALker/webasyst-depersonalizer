@@ -378,6 +378,9 @@ check('F03/F15/F18: production guard, token revocation, strict config', function
     $dsnConfig = StandaloneConfigLoader::load($dir);
     $dsnConfig['database'] = 'fixture_test_shop;dbname=live';
     rejects(fn() => StandaloneConfigLoader::buildDsn($dsnConfig), 'DSN');
+    $dsnConfig['database'] = 'fixture_test_shop';
+    $dsnConfig['charset'] = 'latin1';
+    rejects(fn() => StandaloneConfigLoader::buildDsn($dsnConfig), 'UTF-8');
     unlink($path);
     rmdir($dir);
 });

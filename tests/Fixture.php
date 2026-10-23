@@ -26,7 +26,7 @@ final class FixturePdo extends PDO
                 !preg_match('/^mysql:host=(127[.]0[.]0[.]1|localhost|mysql);port=[0-9]+;dbname=depersonalizer_test_suite$/D', $dsn)) {
                 throw new RuntimeException('Tests require an explicitly enabled, isolated loopback test database.');
             }
-            parent::__construct($dsn, 'root', (string)getenv('DEPERSONALIZER_TEST_PASSWORD'),
+            parent::__construct($dsn . ';charset=utf8mb4', 'root', (string)getenv('DEPERSONALIZER_TEST_PASSWORD'),
                 array(PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_EMULATE_PREPARES => false));
             if ($this->query('SELECT DATABASE()')->fetchColumn() !== 'depersonalizer_test_suite') {
                 throw new RuntimeException('Refusing to reset an unrecognized database.');

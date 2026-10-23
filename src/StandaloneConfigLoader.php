@@ -61,6 +61,9 @@ final class StandaloneConfigLoader
 
         $database = (string)$config['database'];
         $charset = (string)$config['charset'];
+        if (!in_array(strtolower($charset), array('utf8', 'utf8mb4'), true)) {
+            throw new RuntimeException('Ошибка конфигурации: для русских плейсхолдеров требуется UTF-8 (charset=utf8mb4 или utf8).');
+        }
         foreach (array('host', 'database', 'charset', 'socket') as $key) {
             if (preg_match('/[;\x00-\x1f\x7f]/', (string)($config[$key] ?? ''))) {
                 throw new RuntimeException('Ошибка конфигурации: недопустимый разделитель DSN в ' . $key . '.');
